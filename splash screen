@@ -1,0 +1,178 @@
+import React, { useEffect, useState, useRef } from 'react';
+import {
+  View,
+  Image,
+  Text,
+  StyleSheet,
+  TouchableOpacity,
+  Dimensions,
+  StatusBar,
+  Animated,
+} from 'react-native';
+import { Video } from 'expo-av';
+
+const { width, height } = Dimensions.get('window');
+
+const SplashScreen = ({ onFinish }) => {
+  const [showSkip, setShowSkip] = useState(false);
+  const [isVideoReady, setIsVideoReady] = useState(false);
+  
+  // 앱 이름이 올라가는 애니메이션을 위한 변수
+  const appNameMoveUp = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    // 동영상이 준비된 후에 시작 버튼을 표시
+    const startTimer = setTimeout(() => {
+      setShowSkip(true);
+      
+      // Start 버튼이 나타날 때 앱 이름이 천천히 위로 올라감
+      Animated.timing(appNameMoveUp, {
+        toValue: -15, // 위로 15px 이동 (더 적게 올라감)
+        duration: 3000, // 3초 동안 더 천천히
+        useNativeDriver: true,
+      }).start();
+    }, isVideoReady ? 1500 : 3000); // 동영상이 준비되면 1.5초, 아니면 3초
+
+    return () => {
+      clearTimeout(startTimer);
+    };
+  }, [isVideoReady]);
+
+  const handleStart = () => {
+    onFinish();
+  };
+
+  return (
+    <View style={styles.container}>
+      <StatusBar hidden />
+      
+      {/* Travel Video Background */}
+      <Video
+        source={require('../assets/travel.mp4')}
+        style={styles.backgroundVideo}
+        shouldPlay
+        isLooping
+        isMuted
+        resizeMode="cover"
+        onLoad={() => setIsVideoReady(true)}
+        onError={(error) => {
+          console.log('Video load error:', error);
+          setIsVideoReady(true); // 에러가 발생해도 진행
+        }}
+      />
+      
+      {/* Overlay with app info */}
+      <View style={styles.overlay}>
+        <View style={styles.content}>
+          {/* 앱 이름 컨테이너 (애니메이션 적용) */}
+          <Animated.View
+            style={{
+              transform: [{ translateY: appNameMoveUp }],
+            }}
+          >
+            {/* NoPlan text */}
+            <Text style={styles.noPlanText}>NoPlan</Text>
+
+            {/* Explorer text */}
+            <Text style={styles.explorerText}>Explorer</Text>
+            
+            {/* 부제목 */}
+            <Text style={[styles.subtitle, { transform: [{ skewX: '-20deg' }] }]}>Just Go Without Making a Plan</Text>
+          </Animated.View>
+          
+          {/* Start button */}
+          {showSkip && (
+            <TouchableOpacity style={styles.startButton} onPress={handleStart}>
+              <Text style={styles.startText}>Start</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      </View>
+    </View>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#000',
+  },
+  backgroundVideo: {
+    width: width,
+    height: height,
+    position: 'absolute',
+  },
+  overlay: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.4)',
+    paddingHorizontal: 40,
+  },
+  content: {
+    alignItems: 'center',
+    paddingHorizontal: 40,
+  },
+  noPlanText: {
+    fontSize: 48,
+    fontWeight: '900',
+    color: '#fff',
+    marginBottom: 10,
+    marginTop: 80,
+    textAlign: 'center',
+    textShadowColor: 'rgba(0, 0, 0, 0.8)',
+    textShadowOffset: { width: 0, height: 3 },
+    textShadowRadius: 4,
+    letterSpacing: 0.5,
+    fontFamily: 'System',
+  },
+  explorerText: {
+    fontSize: 48,
+    fontWeight: '900',
+    color: '#fff',
+    marginBottom: 35,
+    textAlign: 'center',
+    textShadowColor: 'rgba(0, 0, 0, 0.8)',
+    textShadowOffset: { width: 0, height: 3 },
+    textShadowRadius: 4,
+    letterSpacing: 0.5,
+    fontFamily: 'System',
+  },
+  subtitle: {
+    fontSize: 16,
+    fontWeight: '400',
+    color: '#fff',
+    marginBottom: 40,
+    textAlign: 'center',
+    textShadowColor: 'rgba(0, 0, 0, 0.8)',
+    textShadowOffset: { width: 0, height: 2 },
+    textShadowRadius: 3,
+    letterSpacing: 0.3,
+    fontFamily: 'System',
+    fontStyle: 'italic', // 눕혀쓰는 글씨체
+    opacity: 0.9,
+    transform: [{ skewX: '45deg' }], // 45도 기울이기
+  },
+  startButton: {
+    backgroundColor: 'rgba(255, 255, 255, 0.9)',
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 25,
+    borderWidth: 1,
+    borderColor: '#fff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
+    marginTop: 280,
+  },
+  startText: {
+    color: '#333',
+    fontSize: 18,
+    fontWeight: 'bold',
+    textAlign: 'center',
+  },
+});
+
+export default SplashScreen;
