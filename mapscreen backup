@@ -1,0 +1,3055 @@
+import React, { useEffect, useState, useRef } from 'react';
+import {
+  View,
+  StyleSheet,
+  Dimensions,
+  TextInput,
+  TouchableOpacity,
+  Text,
+  ScrollView,
+  Animated,
+  Alert,
+  Image,
+  Modal,
+  Linking,
+} from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { PanGestureHandler, State } from 'react-native-gesture-handler';
+import MapView, { Marker, Circle, Polyline } from 'react-native-maps';
+import * as Location from 'expo-location';
+import axios from 'axios';
+import 'react-native-gesture-handler';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
+
+const { width, height } = Dimensions.get('window');
+const GOOGLE_API_KEY = 'AIzaSyCqxQ6kxgKTG6mt0FnjcUgrvMcKm1Fluak';
+
+// 키워드-타입 매핑 테이블
+const keywordToType = [
+  { keywords: ['루프탑', 'rooftop', 'bar', 'bars'], type: 'bar' },
+  { keywords: ['카페', '커피', 'coffee', 'cafe', 'cafes'], type: 'cafe' },
+  { keywords: ['맛집', '음식점', '식당', '레스토랑', 'restaurant', 'restaurants'], type: 'restaurant' },
+  { keywords: ['야경', '전망'], type: 'tourist_attraction' },
+  { keywords: ['공원', 'park', 'parks'], type: 'park' },
+  { keywords: ['박물관', 'museum', 'museums'], type: 'museum' },
+  { keywords: ['미술관', 'art gallery', 'art galleries'], type: 'art_gallery' },
+  { keywords: ['쇼핑', '몰', '백화점', 'shopping', 'mall', 'malls'], type: 'shopping_mall' },
+  // 필요시 추가
+];
+
+function extractPlaceTypeFromQuery(query) {
+  const lower = query.toLowerCase();
+  for (const { keywords, type } of keywordToType) {
+    if (keywords.some(k => lower.includes(k))) return type;
+  }
+  return null;
+}
+
+export default function MapScreen({ route }) {
+  const destinationCity = route?.params?.destinationCity || '';
+  const [location, setLocation] = useState(null);
+  const [myLocation, setMyLocation] = useState(null);
+  const [places, setPlaces] = useState([]);
+  const [search, setSearch] = useState(destinationCity);
+  const [suggestions, setSuggestions] = useState([]);
+  const [results, setResults] = useState([]);
+  const [saved, setSaved] = useState([]);
+  const [isPlaceSaved, setIsPlaceSaved] = useState(false);
+  const [routeData, setRouteData] = useState([]);
+  const [polylines, setPolylines] = useState([]);
+  const [showRouteModal, setShowRouteModal] = useState(false);
+  const [showPlaceModal, setShowPlaceModal] = useState(false);
+  const [currentPlace, setCurrentPlace] = useState(null);
+  const [optimizing, setOptimizing] = useState(false);
+  const [popularPlaces, setPopularPlaces] = useState([]); // 추가: 도시 검색 인기 장소 리스트
+  const [loadingPlaces, setLoadingPlaces] = useState(false); // 추가: 로딩 상태
+  const [showTopAttractionsModal, setShowTopAttractionsModal] = useState(false); // Add new state
+  const [showPlaceDetailModal, setShowPlaceDetailModal] = useState(false); // Add new state for place detail
+  const [selectedPlaceDetail, setSelectedPlaceDetail] = useState(null); // Add state for place detail data
+  const [modalState, setModalState] = useState('full'); // 'full', 'horizontal', 'minimized'
+  const [modalHeight, setModalHeight] = useState(height * 0.85);
+  const [isDragging, setIsDragging] = useState(false);
+  const [ignoreMapPress, setIgnoreMapPress] = useState(false);
+  const [searchHistory, setSearchHistory] = useState([]); // 검색 기록
+  const [showSearchHistory, setShowSearchHistory] = useState(false); // 검색 기록 표시 여부
+  const [isSearching, setIsSearching] = useState(false); // 검색 중인지 확인
+  const [exploringLocation, setExploringLocation] = useState(null); // 탐색 중인 특정 위치
+  const [isInExploreMode, setIsInExploreMode] = useState(false); // 탐색 모드인지 확인
+  const [showCurrentLocationRadar, setShowCurrentLocationRadar] = useState(true); // 현재 위치 레이더 표시 여부
+  const [selectedPlaceName, setSelectedPlaceName] = useState(null); // 선택된 장소 이름 표시
+  const [showPlaceNames, setShowPlaceNames] = useState(false); // 장소 이름 표시 여부
+  const [showDescriptionModal, setShowDescriptionModal] = useState(false); // Description modal state
+  const [descriptionText, setDescriptionText] = useState(''); // Description text input
+  const [circleLocation, setCircleLocation] = useState(null); // Location of the circle for saving
+
+  const mapRef = useRef();
+  const watchId = useRef(null);
+  const searchTimeout = useRef();
+  const pulse = useRef(new Animated.Value(1)).current;
+
+  // Load search history on app start
+  useEffect(() => {
+    loadSearchHistory();
+  }, []);
+
+  // Function to search for destination city
+  const searchDestinationCity = async (cityName) => {
+    try {
+      console.log('Searching for destination city:', cityName);
+      const response = await axios.get(
+        `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(cityName)}&key=${GOOGLE_API_KEY}`
+      );
+      
+      if (response.data.results && response.data.results.length > 0) {
+        const result = response.data.results[0];
+        const coords = result.geometry.location;
+        const newLocation = {
+          latitude: coords.lat,
+          longitude: coords.lng,
+          latitudeDelta: 0.05,
+          longitudeDelta: 0.05
+        };
+        
+        setLocation(newLocation);
+        console.log('Destination city found:', result.formatted_address);
+        
+        // Search for places in the destination city
+        const placesResponse = await axios.get(
+          `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${coords.lat},${coords.lng}&radius=5000&type=tourist_attraction&key=${GOOGLE_API_KEY}`
+        );
+        
+        const places = placesResponse.data.results || [];
+        setPlaces(places);
+        console.log('Found places in destination:', places.length);
+      }
+    } catch (error) {
+      console.error('Error searching destination city:', error);
+      Alert.alert('Error', 'Failed to find the destination city');
+    }
+  };
+
+  // Auto-search when destination city is provided
+  useEffect(() => {
+    if (destinationCity && destinationCity.trim()) {
+      console.log('Auto-searching for destination:', destinationCity);
+      searchDestinationCity(destinationCity.trim());
+    }
+  }, [destinationCity]);
+
+  // Animate map to new location when location changes
+  useEffect(() => {
+    if (location && mapRef.current) {
+      console.log('Animating map to location:', location);
+      mapRef.current.animateToRegion(location, 1000);
+    }
+  }, [location]);
+
+  // initial
+  useEffect(() => {
+    let isMounted = true;
+    (async () => {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status === 'granted') {
+        const loc = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.High,
+          timeout: 15000,
+          maximumAge: 0
+        });
+        setMyLocation(loc.coords);
+        setLocation(loc.coords);
+        // Immediately fetch places around current location
+        fetchPlaces(loc.coords);
+        watchId.current = await Location.watchPositionAsync(
+          { accuracy: Location.Accuracy.High, distanceInterval: 10, timeInterval: 5000 },
+          (loc) => {
+            if (isMounted) {
+              console.log('Location updated:', loc.coords);
+              // Only update location if we're not in explore mode
+              if (!isInExploreMode) {
+                setMyLocation(loc.coords);
+                // Only update map location if we're showing current location radar
+                if (showCurrentLocationRadar) {
+                  setLocation(loc.coords);
+                  fetchPlaces(loc.coords);
+                }
+              } else {
+                console.log('In explore mode, not updating location');
+              }
+            }
+          }
+        );
+      }
+    })();
+    return () => {
+      if (watchId.current && typeof watchId.current.remove === 'function') {
+        watchId.current.remove();
+      }
+      watchId.current = null;
+      isMounted = false;
+    };
+  }, []);
+
+  // watch location - only fetch when location actually changes (but not during search or when exploring)
+  useEffect(() => {
+    if (location && !loadingPlaces && !isSearching && !isInExploreMode) {
+      console.log('Location changed, fetching new places...');
+      fetchPlaces(location);
+    }
+  }, [location]);
+
+  const fetchPlaces = async loc => {
+    if (!loc) return;
+    console.log('=== FETCHING PLACES ===');
+    console.log('Current location:', loc.latitude, loc.longitude);
+    console.log('Location accuracy:', loc.accuracy);
+    console.log('Exploring location:', exploringLocation);
+    
+    // Use the provided location for searching
+    const searchLocation = loc;
+    
+    try {
+      const { data } = await axios.get(
+        `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${searchLocation.latitude},${searchLocation.longitude}&radius=1000&type=tourist_attraction&key=${GOOGLE_API_KEY}`
+      );
+      console.log('Found places around you:', data.results?.length || 0);
+      
+      // Log some place names to verify location
+      if (data.results && data.results.length > 0) {
+        console.log('Sample places found:', data.results.slice(0, 3).map(p => p.name));
+      }
+      
+      // Simplified filtering for faster processing
+      const filteredPlaces = (data.results || [])
+        .filter(p => {
+          const rating = p.rating || 0;
+          const userRatings = p.user_ratings_total || 0;
+          
+          // Basic quality filters only
+          return rating >= 3.5 && userRatings >= 5;
+        })
+        .slice(0, 8); // Limit to 8 places for faster rendering
+      
+      console.log('Filtered places around you:', filteredPlaces.length);
+      console.log('Places names:', filteredPlaces.map(p => p.name));
+      setPlaces(filteredPlaces);
+    } catch (error) {
+      console.log('Error fetching places:', error);
+    }
+  };
+
+  // Helper: fetch full place details
+  const fetchPlaceDetails = async (placeId, fields = 'name,types,rating,user_ratings_total,photos,vicinity,geometry') => {
+    try {
+      const detailRes = await axios.get(
+        `https://maps.googleapis.com/maps/api/place/details/json?place_id=${placeId}&fields=${encodeURIComponent(fields)}&key=${GOOGLE_API_KEY}`
+      );
+      return detailRes.data.result;
+    } catch (e) {
+      console.error('fetchPlaceDetails error', e);
+      return null;
+    }
+  };
+
+  // Helper: find nearest POI at map tap
+  const pickNearestPlaceAt = async (coord) => {
+    try {
+      const res = await axios.get(
+        `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${coord.latitude},${coord.longitude}&rankby=distance&type=point_of_interest&key=${GOOGLE_API_KEY}`
+      );
+      const first = (res.data.results || [])[0];
+      if (!first) return null;
+      const details = await fetchPlaceDetails(first.place_id);
+      const merged = {
+        id: first.place_id,
+        latitude: first.geometry.location.lat,
+        longitude: first.geometry.location.lng,
+        name: details?.name || first.name,
+        address: details?.vicinity || first.vicinity || '',
+        rating: details?.rating ?? first.rating ?? 0,
+        photo: details?.photos?.[0]?.photo_reference || first.photos?.[0]?.photo_reference || null,
+        types: details?.types || first.types || [],
+        user_ratings_total: details?.user_ratings_total ?? first.user_ratings_total ?? 0,
+      };
+      return merged;
+    } catch (e) {
+      console.error('pickNearestPlaceAt error', e);
+      return null;
+    }
+  };
+
+  // search autocomplete
+  // 검색 기록 로드
+  const loadSearchHistory = async () => {
+    try {
+      const history = await AsyncStorage.getItem('searchHistory');
+      if (history) {
+        setSearchHistory(JSON.parse(history));
+      }
+    } catch (error) {
+      console.error('Error loading search history:', error);
+    }
+  };
+
+  // 검색 기록 저장
+  const saveSearchHistory = async (searchTerm) => {
+    try {
+      const newHistory = [searchTerm, ...searchHistory.filter(item => item !== searchTerm)].slice(0, 10);
+      setSearchHistory(newHistory);
+      await AsyncStorage.setItem('searchHistory', JSON.stringify(newHistory));
+    } catch (error) {
+      console.error('Error saving search history:', error);
+    }
+  };
+
+  // 검색 기록 삭제
+  const clearSearchHistory = async () => {
+    try {
+      setSearchHistory([]);
+      await AsyncStorage.removeItem('searchHistory');
+    } catch (error) {
+      console.error('Error clearing search history:', error);
+    }
+  };
+
+  const onSearch = text => {
+    setSearch(text);
+    setShowSearchHistory(false);
+    clearTimeout(searchTimeout.current);
+    if (text.length > 2) {
+      searchTimeout.current = setTimeout(() => autocomplete(text), 300);
+    } else {
+      setSuggestions([]);
+    }
+  };
+  const autocomplete = async text => {
+    const locParam = location
+      ? `&location=${location.latitude},${location.longitude}&radius=50000`
+      : '';
+    const { data } = await axios.get(
+      `https://maps.googleapis.com/maps/api/place/autocomplete/json?input=${encodeURIComponent(text)}&key=${GOOGLE_API_KEY}${locParam}`
+    );
+    setSuggestions(data.predictions || []);
+  };
+  const selectSuggestion = async s => {
+    setSearch(s.description);
+    setSuggestions([]);
+    const { data } = await axios.get(
+      `https://maps.googleapis.com/maps/api/place/details/json?place_id=${s.place_id}&fields=geometry,name,vicinity,rating,photos&key=${GOOGLE_API_KEY}`
+    );
+    const p = data.result;
+    const item = {
+      id: p.place_id,
+      latitude: p.geometry.location.lat,
+      longitude: p.geometry.location.lng,
+      name: p.name,
+      address: p.vicinity,
+      rating: p.rating || 0,
+      photo: p.photos?.[0]?.photo_reference || null,
+      types: p.types || [],
+      user_ratings_total: p.user_ratings_total || 0,
+    };
+    setResults([item]);
+    mapRef.current.animateToRegion({ latitude: item.latitude, longitude: item.longitude, latitudeDelta: 0.01, longitudeDelta: 0.01 }, 1000);
+    // Open small modal so user can save directly even if not in Top Attractions
+    setCurrentPlace(item);
+    setShowPlaceModal(true);
+  };
+
+  const handleDirectSearch = async () => {
+    if (!search) return;
+    saveSearchHistory(search); // 검색 기록 저장
+    setLoadingPlaces(true);
+    setIsSearching(true);
+    setPopularPlaces([]);
+    
+    try {
+      // First, try to find the specific place using Google Places Text Search
+      const placesResponse = await axios.get(
+        `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(search)}&key=${GOOGLE_API_KEY}`
+      );
+      
+      if (placesResponse.data.results && placesResponse.data.results.length > 0) {
+        const place = placesResponse.data.results[0];
+        const placeData = {
+          id: place.place_id,
+          latitude: place.geometry.location.lat,
+          longitude: place.geometry.location.lng,
+          name: place.name,
+          address: place.formatted_address || place.vicinity,
+          vicinity: place.vicinity,
+          rating: place.rating || 0,
+          photo: place.photos?.[0]?.photo_reference || null,
+          types: place.types || [],
+          user_ratings_total: place.user_ratings_total || 0,
+        };
+        
+        // Show the place on the map
+        const newLocation = {
+          latitude: place.geometry.location.lat,
+          longitude: place.geometry.location.lng,
+          latitudeDelta: 0.01,
+          longitudeDelta: 0.01
+        };
+        setLocation(newLocation);
+        setExploringLocation(place.geometry.location); // Set exploring location for radar
+        setIsInExploreMode(true); // Enter explore mode
+        
+        // Check if user is in the same city/area as the searched landmark
+        const distance = getDistance(myLocation, place.geometry.location);
+        const isInSameArea = distance < 50000; // Within 50km
+        setShowCurrentLocationRadar(isInSameArea);
+        
+        // Add the searched landmark to places array so it shows as a circular marker
+        // Also fetch nearby places around this landmark
+        setPlaces([place]);
+        fetchPlaces(place.geometry.location);
+        
+        // Animate to the location
+        if (mapRef.current) {
+          mapRef.current.animateToRegion(newLocation, 1000);
+        }
+        
+        // Show the place details modal
+        setCurrentPlace(placeData);
+        setShowPlaceModal(true);
+        setLoadingPlaces(false);
+        setIsSearching(false);
+        return;
+      }
+    } catch (error) {
+      console.log('Places API search failed, trying geocoding...', error);
+    }
+    
+    // If Places API didn't work, try geocoding as fallback
+    try {
+      const { data } = await axios.get(
+        `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(search)}&key=${GOOGLE_API_KEY}`
+      );
+      
+      if (!data.results.length) {
+        setLoadingPlaces(false);
+        return Alert.alert('No results found');
+      }
+      
+      const loc = data.results[0].geometry.location;
+      const newLocation = {
+        latitude: loc.lat,
+        longitude: loc.lng,
+        latitudeDelta: 0.01,
+        longitudeDelta: 0.01
+      };
+      setLocation(newLocation);
+      setExploringLocation(loc); // Set exploring location for radar
+      setIsInExploreMode(true); // Enter explore mode
+      
+      // Check if user is in the same city/area as the searched location
+      const distance = getDistance(myLocation, loc);
+      const isInSameArea = distance < 50000; // Within 50km
+      setShowCurrentLocationRadar(isInSameArea);
+      
+      // Add the searched location to places array so it shows as a circular marker
+      const placeData = {
+        id: data.results[0].place_id || `${loc.lat},${loc.lng}`,
+        latitude: loc.lat,
+        longitude: loc.lng,
+        name: data.results[0].formatted_address || search,
+        address: data.results[0].formatted_address || '',
+        rating: 0,
+        photo: null,
+        types: [],
+        user_ratings_total: 0,
+        geometry: {
+          location: {
+            lat: loc.lat,
+            lng: loc.lng
+          }
+        },
+        vicinity: data.results[0].formatted_address || ''
+      };
+      setPlaces([placeData]);
+      // Also fetch nearby places around this location
+      fetchPlaces(loc);
+      
+      // Animate to the location
+      if (mapRef.current) {
+        mapRef.current.animateToRegion(newLocation, 1000);
+      }
+      
+      setCurrentPlace(placeData);
+      setShowPlaceModal(true);
+    } catch (error) {
+      Alert.alert('Error', 'Failed to find the location');
+    }
+    
+    setLoadingPlaces(false);
+    setIsSearching(false);
+    
+    // Check if the search contains category keywords
+    const lower = search.toLowerCase();
+    const typeMap = {
+      'restaurant': 'restaurant',
+      'restaurants': 'restaurant',
+      'cafe': 'cafe',
+      'cafes': 'cafe',
+      'bar': 'bar',
+      'bars': 'bar',
+      'museum': 'museum',
+      'museums': 'museum',
+      'park': 'park',
+      'parks': 'park',
+      'hotel': 'hotel',
+      'hotels': 'hotel',
+      'bakery': 'bakery',
+      'bakeries': 'bakery',
+      'library': 'library',
+      'libraries': 'library',
+      'shopping': 'shopping_mall',
+      'mall': 'shopping_mall',
+      'malls': 'shopping_mall',
+      'atm': 'atm',
+      'atms': 'atm',
+      'bank': 'bank',
+      'banks': 'bank',
+      'pharmacy': 'pharmacy',
+      'pharmacies': 'pharmacy',
+      'supermarket': 'supermarket',
+      'supermarkets': 'supermarket',
+      'convenience': 'convenience_store',
+      'convenience store': 'convenience_store',
+      'convenience stores': 'convenience_store',
+    };
+    
+    // Cuisine-specific mapping for restaurant searches
+    const cuisineMap = {
+      'thai': 'thai_restaurant',
+      'korean': 'korean_restaurant', 
+      'japanese': 'japanese_restaurant',
+      'chinese': 'chinese_restaurant',
+      'italian': 'italian_restaurant',
+      'mexican': 'mexican_restaurant',
+      'indian': 'indian_restaurant',
+      'french': 'french_restaurant',
+      'greek': 'greek_restaurant',
+      'lebanese': 'lebanese_restaurant',
+      'turkish': 'turkish_restaurant',
+      'vietnamese': 'vietnamese_restaurant',
+      'mediterranean': 'mediterranean_restaurant',
+      'american': 'american_restaurant',
+      'seafood': 'seafood_restaurant',
+      'steakhouse': 'steakhouse',
+      'pizza': 'pizza_restaurant',
+      'sushi': 'sushi_restaurant',
+      'ramen': 'ramen_restaurant',
+      'barbecue': 'barbecue_restaurant',
+      'bbq': 'barbecue_restaurant',
+    };
+    
+    // Check for cuisine-specific search first
+    let foundCuisine = null;
+    Object.keys(cuisineMap).forEach(k => {
+      if (lower.includes(k)) foundCuisine = cuisineMap[k];
+    });
+    
+    let foundType = null;
+    Object.keys(typeMap).forEach(k => {
+      if (lower.includes(k)) foundType = typeMap[k];
+    });
+    
+    // If it's a cuisine-specific search with "near me"
+    if (lower.includes('near me') && foundCuisine && myLocation) {
+      console.log('Searching for cuisine:', foundCuisine);
+      
+      // Search for all restaurants first, then filter by cuisine
+      const placesRes = await axios.get(
+        `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${myLocation.latitude},${myLocation.longitude}&radius=10000&type=restaurant&key=${GOOGLE_API_KEY}`
+      );
+      
+      console.log('Found restaurants:', placesRes.data.results?.length || 0);
+      
+      // Get detailed information for better cuisine detection
+      const detailedPlaces = await Promise.all(
+        (placesRes.data.results || []).map(async (place) => {
+          try {
+            const detailRes = await axios.get(
+              `https://maps.googleapis.com/maps/api/place/details/json?place_id=${place.place_id}&fields=types,editorial_summary&key=${GOOGLE_API_KEY}`
+            );
+            return {
+              ...place,
+              types: [...new Set([...(place.types || []), ...(detailRes.data.result?.types || [])])],
+              editorial_summary: detailRes.data.result?.editorial_summary || null
+            };
+          } catch (error) {
+            console.error('Error fetching place details:', error);
+            return place;
+          }
+        })
+      );
+      
+      // Filter by rating and ensure it's the right cuisine type
+      const filtered = detailedPlaces.filter(p => {
+        const hasGoodRating = (p.rating || 0) >= 3.5;
+        const detectedCuisine = getCuisineType(p);
+        const expectedCuisine = foundCuisine.replace('_restaurant', '');
+        const isCorrectCuisine = detectedCuisine && detectedCuisine.toLowerCase() === expectedCuisine;
+        
+        console.log(`${p.name}: rating=${p.rating}, types=${p.types}, detectedCuisine=${detectedCuisine}, expected=${expectedCuisine}, isCorrect=${isCorrectCuisine}`);
+        
+        return hasGoodRating && isCorrectCuisine;
+      });
+      
+      console.log('Filtered to cuisine-specific restaurants:', filtered.length);
+      setPopularPlaces(filtered);
+      setLoadingPlaces(false);
+      setLocation(myLocation);
+      mapRef.current.animateToRegion({ latitude: myLocation.latitude, longitude: myLocation.longitude, latitudeDelta: 0.08, longitudeDelta: 0.08 }, 1000);
+      return;
+    }
+    
+    // If it's a general category search with "near me"
+    if (lower.includes('near me') && foundType && myLocation) {
+      const placesRes = await axios.get(
+        `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${myLocation.latitude},${myLocation.longitude}&radius=10000&type=${foundType}&key=${GOOGLE_API_KEY}`
+      );
+      const filtered = (placesRes.data.results || []).filter(p => (p.rating||0) >= 3.5);
+      setPopularPlaces(filtered);
+      setLoadingPlaces(false);
+      setLocation(myLocation);
+      mapRef.current.animateToRegion({ latitude: myLocation.latitude, longitude: myLocation.longitude, latitudeDelta: 0.08, longitudeDelta: 0.08 }, 1000);
+      return;
+    }
+    
+    // If it's a category search with city name
+    if (foundType) {
+      let city = '';
+      const inIdx = lower.indexOf('in ');
+      if (inIdx !== -1) {
+        city = search.substring(inIdx + 3).trim();
+      } else {
+        city = search.replace(/restaurants|restaurant|cafes|cafe|bars|bar|museums|museum|parks|park|hotels|hotel|bakeries|bakery|libraries|library|shopping|mall|malls|atm|atms|bank|banks|pharmacy|pharmacies|supermarket|supermarkets|convenience|convenience store|convenience stores/gi, '').trim();
+      }
+      if (city.length === 0) {
+        setLoadingPlaces(false);
+        return Alert.alert('Please specify a city or use "near me"');
+      }
+      
+      const geoRes = await axios.get(
+        `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(city)}&key=${GOOGLE_API_KEY}`
+      );
+      if (!geoRes.data.results.length) {
+        setLoadingPlaces(false);
+        return Alert.alert('City not found');
+      }
+      const cityLoc = geoRes.data.results[0].geometry.location;
+      setLocation(cityLoc);
+      mapRef.current.animateToRegion({ latitude: cityLoc.lat, longitude: cityLoc.lng, latitudeDelta: 0.08, longitudeDelta: 0.08 }, 1000);
+      
+      const placesRes = await axios.get(
+        `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${cityLoc.lat},${cityLoc.lng}&radius=10000&type=${foundType}&key=${GOOGLE_API_KEY}`
+      );
+      
+      // Get detailed information including internationalized names and cuisine types
+      const detailedPlaces = await Promise.all(
+        (placesRes.data.results || []).map(async (place) => {
+          try {
+            const detailRes = await axios.get(
+              `https://maps.googleapis.com/maps/api/place/details/json?place_id=${place.place_id}&fields=internationalized_name,types,editorial_summary,price_level,opening_hours&key=${GOOGLE_API_KEY}`
+            );
+            return {
+              ...place,
+              internationalized_name: detailRes.data.result?.internationalized_name || null,
+              // Merge any additional types from details API
+              types: [...new Set([...(place.types || []), ...(detailRes.data.result?.types || [])])],
+              editorial_summary: detailRes.data.result?.editorial_summary || null,
+              price_level: detailRes.data.result?.price_level || place.price_level,
+              opening_hours: detailRes.data.result?.opening_hours || place.opening_hours
+            };
+          } catch (error) {
+            console.error('Error fetching place details:', error);
+            return place;
+          }
+        })
+      );
+      
+      const filtered = detailedPlaces.filter(p => (p.rating||0) >= 3.5);
+      setPopularPlaces(filtered);
+      setLoadingPlaces(false);
+      return;
+    }
+    
+    // Default: Show top attractions for the city (this is what was missing!)
+    try {
+      // Get ONLY tourist attractions for the city (like Google Maps Iconic Places)
+      const attractionsRes = await axios.get(
+        `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${loc.lat},${loc.lng}&radius=15000&type=tourist_attraction&key=${GOOGLE_API_KEY}`
+      );
+      
+      // Get detailed information including internationalized names and cuisine types
+      const detailedAttractions = await Promise.all(
+        (attractionsRes.data.results || []).map(async (place) => {
+          try {
+            const detailRes = await axios.get(
+              `https://maps.googleapis.com/maps/api/place/details/json?place_id=${place.place_id}&fields=internationalized_name,types,editorial_summary,price_level,opening_hours&key=${GOOGLE_API_KEY}`
+            );
+            return {
+              ...place,
+              internationalized_name: detailRes.data.result?.internationalized_name || null,
+              // Merge any additional types from details API
+              types: [...new Set([...(place.types || []), ...(detailRes.data.result?.types || [])])],
+              editorial_summary: detailRes.data.result?.editorial_summary || null,
+              price_level: detailRes.data.result?.price_level || place.price_level,
+              opening_hours: detailRes.data.result?.opening_hours || place.opening_hours
+            };
+          } catch (error) {
+            console.error('Error fetching place details:', error);
+            return place;
+          }
+        })
+      );
+      
+      // Filter attractions - keep museums, landmarks, and real tourist attractions
+      const filteredAttractions = detailedAttractions.filter(p => {
+        const types = p.types || [];
+        const name = p.name.toLowerCase();
+        
+        // Include these important types
+        const includeTypes = [
+          'tourist_attraction', 'museum', 'art_gallery', 'church', 'cathedral',
+          'synagogue', 'mosque', 'temple', 'castle', 'palace', 'monument',
+          'memorial', 'park', 'garden', 'zoo', 'aquarium', 'amusement_park',
+          'natural_feature', 'point_of_interest'
+        ];
+        
+        // If it has any of the include types, keep it
+        if (includeTypes.some(type => types.includes(type))) {
+          // But still check for hotel-related types
+          const hotelTypes = ['lodging', 'hotel', 'motel', 'inn', 'resort', 'accommodation'];
+          if (hotelTypes.some(type => types.includes(type))) {
+            console.log('제외됨 (호텔 타입):', p.name, '타입:', types);
+            return false;
+          }
+          return true;
+        }
+        
+        // Exclude these types
+        const excludeTypes = [
+          'travel_agency', 'lodging', 'restaurant', 'food', 'cafe', 'bar', 
+          'shopping_mall', 'store', 'bank', 'atm', 'pharmacy', 'hospital',
+          'school', 'university', 'library', 'post_office', 'police',
+          'car_rental', 'car_dealer', 'gas_station', 'convenience_store',
+          'establishment', 'local_government_office', 'hotel', 'motel', 'inn',
+          'resort', 'accommodation', 'guest_house', 'hostel', 'bed_and_breakfast'
+        ];
+        
+        // Exclude if any of the exclude types are present
+        if (excludeTypes.some(type => types.includes(type))) {
+          console.log('제외됨 (타입):', p.name, '타입:', types.filter(type => excludeTypes.includes(type)));
+          return false;
+        }
+        
+        // Exclude by name patterns (case insensitive)
+        const excludeNamePatterns = [
+          'travel agency', 'tour agency', 'hotel', 'motel', 'inn', 'resort',
+          'restaurant', 'cafe', 'bar', 'pub', 'grill', 'diner',
+          'bank', 'atm', 'pharmacy', 'drugstore', 'convenience store',
+          'gas station', 'car rental', 'car dealer', '호텔', '모텔', '펜션',
+          '게스트하우스', '호스텔', '숙박', 'accommodation', 'guesthouse',
+          'hostel', 'bed and breakfast', 'bnb', 'guest house', 'noble'
+        ];
+        
+        if (excludeNamePatterns.some(pattern => name.includes(pattern))) {
+          console.log('제외됨 (이름 패턴):', p.name, '패턴:', excludeNamePatterns.find(pattern => name.includes(pattern)));
+          return false;
+        }
+        
+        // Additional strong filter for hotel-related names
+        const hotelKeywords = ['hotel', '호텔', '모텔', '펜션', 'resort', 'inn', 'motel', 'lodging'];
+        if (hotelKeywords.some(keyword => name.includes(keyword))) {
+          console.log('제외됨 (호텔 키워드):', p.name);
+          return false;
+        }
+        
+        return true;
+      });
+      
+      // Only use tourist attractions, no restaurants or museums
+      const topPlaces = filteredAttractions
+        .filter(p => (p.rating || 0) >= 3.5)
+        .sort((a, b) => {
+          // First sort by rating
+          const ratingDiff = (b.rating || 0) - (a.rating || 0);
+          if (Math.abs(ratingDiff) > 0.1) {
+            return ratingDiff;
+          }
+          // If ratings are similar, sort by review count
+          return (b.user_ratings_total || 0) - (a.user_ratings_total || 0);
+        })
+        .slice(0, 30);
+      
+      setPopularPlaces(topPlaces);
+      setLoadingPlaces(false);
+      
+      // Show the modal with results
+      if (topPlaces.length > 0) {
+        setShowTopAttractionsModal(true);
+      } else {
+        Alert.alert('No Results', 'No popular attractions found for this city. Try a different search term.');
+      }
+    } catch (error) {
+      console.error('Error fetching places:', error);
+      setLoadingPlaces(false);
+      Alert.alert('Error', 'Failed to load places for this city');
+    }
+  };
+
+  const savePlace = p => {
+    console.log('=== SAVE PLACE FUNCTION ===');
+    console.log('Saving place:', p.name);
+    console.log('Place ID:', p.id, 'Place place_id:', p.place_id);
+    console.log('Current saved places:', saved.map(s => s.name));
+    
+    const isAlreadySaved = saved.find(savedPlace => {
+      const idMatch = savedPlace.id === p.id;
+      const placeIdMatch = savedPlace.place_id === p.place_id;
+      const nameMatch = savedPlace.name === p.name;
+      
+      console.log('Checking against saved place:', savedPlace.name, {
+        idMatch, placeIdMatch, nameMatch
+      });
+      
+      return idMatch || placeIdMatch || nameMatch;
+    });
+    
+    console.log('Is already saved?', !!isAlreadySaved);
+    
+    if (!isAlreadySaved) {
+      // Save the place
+      const placeToSave = {
+        ...p,
+        id: p.id || p.place_id || Date.now(), // Ensure unique ID
+        savedAt: new Date().toISOString()
+      };
+      
+      console.log('Adding place to saved:', placeToSave.name);
+      setSaved(prev => [...prev, placeToSave]);
+      setIsPlaceSaved(true);
+      Alert.alert('Saved', `${p.name} added to your saved places.`);
+    } else {
+      // Unsave the place
+      console.log('Removing place from saved:', p.name);
+      setSaved(prev => prev.filter(savedPlace => {
+        const idMatch = savedPlace.id === p.id;
+        const placeIdMatch = savedPlace.place_id === p.place_id;
+        const nameMatch = savedPlace.name === p.name;
+        return !(idMatch || placeIdMatch || nameMatch);
+      }));
+      setIsPlaceSaved(false);
+      Alert.alert('Removed', `${p.name} removed from your saved places.`);
+    }
+    // Keep modal open so user can see the button change
+  };
+
+  const savePlaceWithDescription = () => {
+    if (!circleLocation || !descriptionText.trim()) {
+      Alert.alert('Error', 'Please enter a description for this location.');
+      return;
+    }
+
+    const placeToSave = {
+      id: `circle_${Date.now()}`,
+      name: descriptionText.trim(),
+      latitude: circleLocation.latitude,
+      longitude: circleLocation.longitude,
+      geometry: {
+        location: {
+          lat: circleLocation.latitude,
+          lng: circleLocation.longitude
+        }
+      },
+      savedAt: new Date().toISOString(),
+      isCustomPlace: true
+    };
+
+    setSaved(prev => [...prev, placeToSave]);
+    setShowDescriptionModal(false);
+    setDescriptionText('');
+    setCircleLocation(null);
+    Alert.alert('Saved', `"${descriptionText.trim()}" has been saved to your places.`);
+  };
+
+  const checkIfPlaceIsSaved = (place) => {
+    console.log('Checking if place is saved:', place.name);
+    console.log('Current saved places:', saved.map(s => s.name));
+    console.log('Place ID:', place.id, 'Place place_id:', place.place_id);
+    
+    const isSaved = saved.some(savedPlace => {
+      const idMatch = savedPlace.id === place.id;
+      const placeIdMatch = savedPlace.place_id === place.place_id;
+      const nameMatch = savedPlace.name === place.name;
+      
+      console.log('Comparing with saved place:', savedPlace.name, {
+        idMatch, placeIdMatch, nameMatch
+      });
+      
+      return idMatch || placeIdMatch || nameMatch;
+    });
+    
+    console.log('Is place saved?', isSaved);
+    setIsPlaceSaved(isSaved);
+    return isSaved;
+  };
+
+  const clearAllSavedPlaces = () => {
+    setSaved([]);
+    setIsPlaceSaved(false);
+    console.log('All saved places cleared');
+  };
+
+  // optimize route
+  const optimize = async () => {
+    if (saved.length < 2) return Alert.alert('Save at least 2 places');
+    setOptimizing(true);
+    // greedy TSP
+    const all = [{ latitude: myLocation.latitude, longitude: myLocation.longitude, name: 'Start' }, ...saved];
+    const visited = new Set([0]);
+    const routeOrder = [0];
+    while (visited.size < all.length) {
+      const last = routeOrder[routeOrder.length - 1];
+      let next = -1, minD = Infinity;
+      all.forEach((pt, idx) => {
+        if (!visited.has(idx)) {
+          const d = getDistance(all[last], pt);
+          if (d < minD) { minD = d; next = idx; }
+        }
+      });
+      visited.add(next);
+      routeOrder.push(next);
+    }
+    const routePts = routeOrder.map(i => all[i]);
+    setRouteData(routePts);
+    // fetch polylines
+    const lines = [];
+    for (let i = 0; i < routePts.length - 1; i++) {
+      const o = routePts[i], d = routePts[i + 1];
+      const res = await axios.get(
+        `https://maps.googleapis.com/maps/api/directions/json?origin=${o.latitude},${o.longitude}&destination=${d.latitude},${d.longitude}&key=${GOOGLE_API_KEY}`
+      );
+      const pts = decodePolyline(res.data.routes[0].overview_polyline.points);
+      lines.push({ coordinates: pts, strokeColor: i === 0 ? '#4CAF50' : '#2196F3', strokeWidth: 4 });
+    }
+    setPolylines(lines);
+    setOptimizing(false);
+    setShowRouteModal(true);
+  };
+
+  const getDistance = (a, b) => {
+    const R = 6371e3;
+    const φ1 = (a.latitude * Math.PI) / 180;
+    const φ2 = (b.latitude * Math.PI) / 180;
+    const Δφ = ((b.latitude - a.latitude) * Math.PI) / 180;
+    const Δλ = ((b.longitude - a.longitude) * Math.PI) / 180;
+    const aa = Math.sin(Δφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
+    const cc = 2 * Math.atan2(String(Math.sqrt(aa)), String(Math.sqrt(1 - aa)));
+    return R * cc;
+  };
+
+  function decodePolyline(encoded) {
+    let index = 0;
+    const path = [];
+    let lat = 0;
+    let lng = 0;
+    while (index < encoded.length) {
+      let shift = 0;
+      let result = 0;
+      let byte;
+      do {
+        byte = encoded.charCodeAt(index++) - 63;
+        result |= (byte & 0x1f) << shift;
+        shift += 5;
+      } while (byte >= 0x20);
+      lat += result & 1 ? ~(result >> 1) : result >> 1;
+      shift = 0;
+      result = 0;
+      do {
+        byte = encoded.charCodeAt(index++) - 63;
+        result |= (byte & 0x1f) << shift;
+        shift += 5;
+      } while (byte >= 0x20);
+      lng += result & 1 ? ~(result >> 1) : result >> 1;
+      path.push({ latitude: lat / 1e5, longitude: lng / 1e5 });
+    }
+    return path;
+  }
+
+
+
+  // Helper function to get English name in parentheses (if available)
+  const getEnglishNameInParentheses = (place) => {
+    // Try to get English name from internationalized_name if available
+    if (place.internationalized_name) {
+      return ` (${place.internationalized_name})`;
+    }
+    return '';
+  };
+
+  // Helper function to get English type description for second line
+  const getEnglishType = (place) => {
+    // Generate simple English description based on types
+    const types = place.types || [];
+    console.log('getEnglishType 호출:', place.name, 'types:', types);
+    
+    const simpleDescriptions = {
+      'bridge': 'Bridge',
+      'church': 'Church',
+      'cathedral': 'Cathedral',
+      'castle': 'Castle',
+      'palace': 'Palace',
+      'tower': 'Tower',
+      'monument': 'Monument',
+      'memorial': 'Memorial',
+      'park': 'Park',
+      'garden': 'Garden',
+      'museum': 'Museum',
+      'art_gallery': 'Art Gallery',
+      'temple': 'Temple',
+      'shrine': 'Shrine',
+      'fortress': 'Fortress',
+      'ruins': 'Ruins',
+      'observatory': 'Observatory',
+      'lighthouse': 'Lighthouse',
+      'windmill': 'Windmill',
+      'clock_tower': 'Clock Tower',
+      'bell_tower': 'Bell Tower',
+      'opera_house': 'Opera House',
+      'theater': 'Theater',
+      'concert_hall': 'Concert Hall',
+      'stadium': 'Stadium',
+      'zoo': 'Zoo',
+      'aquarium': 'Aquarium',
+      'amusement_park': 'Amusement Park',
+      'point_of_interest': 'Point of Interest',
+      'tourist_attraction': 'Tourist Attraction' // 가장 마지막에 배치
+    };
+    
+    // First, check name patterns for common words (more specific)
+    const name = place.name || '';
+    if (name.toLowerCase().includes('bridge')) return 'Bridge';
+    if (name.toLowerCase().includes('castle')) return 'Castle';
+    if (name.toLowerCase().includes('church')) return 'Church';
+    if (name.toLowerCase().includes('cathedral')) return 'Cathedral';
+    if (name.toLowerCase().includes('palace')) return 'Palace';
+    if (name.toLowerCase().includes('tower')) return 'Tower';
+    if (name.toLowerCase().includes('square')) return 'Square';
+    if (name.toLowerCase().includes('park')) return 'Park';
+    if (name.toLowerCase().includes('museum')) return 'Museum';
+    if (name.toLowerCase().includes('temple')) return 'Temple';
+    if (name.toLowerCase().includes('monument')) return 'Monument';
+    if (name.toLowerCase().includes('memorial')) return 'Memorial';
+    if (name.toLowerCase().includes('fortress')) return 'Fortress';
+    if (name.toLowerCase().includes('ruins')) return 'Ruins';
+    if (name.toLowerCase().includes('observatory')) return 'Observatory';
+    if (name.toLowerCase().includes('lighthouse')) return 'Lighthouse';
+    if (name.toLowerCase().includes('windmill')) return 'Windmill';
+    if (name.toLowerCase().includes('opera')) return 'Opera House';
+    if (name.toLowerCase().includes('theater') || name.toLowerCase().includes('theatre')) return 'Theater';
+    if (name.toLowerCase().includes('concert')) return 'Concert Hall';
+    if (name.toLowerCase().includes('stadium')) return 'Stadium';
+    if (name.toLowerCase().includes('zoo')) return 'Zoo';
+    if (name.toLowerCase().includes('aquarium')) return 'Aquarium';
+    if (name.toLowerCase().includes('garden')) return 'Garden';
+    if (name.toLowerCase().includes('shrine')) return 'Shrine';
+    
+    // Korean patterns
+    if (name.includes('교') || name.includes('bridge')) return 'Bridge';
+    if (name.includes('성') || name.includes('castle')) return 'Castle';
+    if (name.includes('교회') || name.includes('church')) return 'Church';
+    if (name.includes('광장') || name.includes('square')) return 'Square';
+    if (name.includes('탑') || name.includes('tower')) return 'Tower';
+    if (name.includes('공원') || name.includes('park')) return 'Park';
+    if (name.includes('박물관') || name.includes('museum')) return 'Museum';
+    if (name.includes('사원') || name.includes('temple')) return 'Temple';
+    if (name.includes('궁') || name.includes('palace')) return 'Palace';
+    if (name.includes('산') || name.includes('mountain')) return 'Mountain';
+    if (name.includes('강') || name.includes('river')) return 'River';
+    if (name.includes('해변') || name.includes('beach')) return 'Beach';
+    if (name.includes('섬') || name.includes('island')) return 'Island';
+    
+    // Then check types (less specific)
+    for (const type of types) {
+      if (simpleDescriptions[type]) {
+        console.log('타입 매칭됨:', type, '->', simpleDescriptions[type]);
+        return simpleDescriptions[type];
+      }
+    }
+    
+    console.log('기본값 반환: Landmark');
+    return 'Landmark';
+  };
+
+  // Helper function to get cuisine type for restaurants
+  const getCuisineType = (place) => {
+    if (!place.types) return null;
+    
+    // Debug: Log the place data to see what we're getting
+    console.log('Cuisine detection for:', place.name, 'Types:', place.types);
+    
+    // First, check Google Places API types for cuisine-specific types
+    const cuisineTypes = [
+      'thai_restaurant', 'korean_restaurant', 'japanese_restaurant', 'chinese_restaurant',
+      'italian_restaurant', 'mexican_restaurant', 'indian_restaurant', 'french_restaurant',
+      'greek_restaurant', 'lebanese_restaurant', 'turkish_restaurant', 'vietnamese_restaurant',
+      'mediterranean_restaurant', 'american_restaurant', 'seafood_restaurant', 'steakhouse',
+      'pizza_restaurant', 'sushi_restaurant', 'ramen_restaurant', 'barbecue_restaurant',
+      'soul_food_restaurant', 'cajun_restaurant', 'creole_restaurant', 'caribbean_restaurant',
+      'brazilian_restaurant', 'argentine_restaurant', 'peruvian_restaurant', 'chilean_restaurant',
+      'spanish_restaurant', 'portuguese_restaurant', 'dutch_restaurant', 'belgian_restaurant',
+      'swiss_restaurant', 'austrian_restaurant', 'german_restaurant', 'polish_restaurant',
+      'russian_restaurant', 'ukrainian_restaurant', 'hungarian_restaurant', 'czech_restaurant',
+      'slovak_restaurant', 'romanian_restaurant', 'bulgarian_restaurant', 'serbian_restaurant',
+      'croatian_restaurant', 'slovenian_restaurant', 'bosnian_restaurant', 'montenegrin_restaurant',
+      'macedonian_restaurant', 'albanian_restaurant', 'kosovan_restaurant', 'moldovan_restaurant',
+      'georgian_restaurant', 'armenian_restaurant', 'azerbaijani_restaurant', 'kazakh_restaurant',
+      'uzbek_restaurant', 'kyrgyz_restaurant', 'tajik_restaurant', 'turkmen_restaurant',
+      'afghan_restaurant', 'pakistani_restaurant', 'bangladeshi_restaurant', 'sri_lankan_restaurant',
+      'nepalese_restaurant', 'bhutanese_restaurant', 'maldivian_restaurant', 'mongolian_restaurant',
+      'filipino_restaurant', 'indonesian_restaurant', 'malaysian_restaurant', 'singaporean_restaurant',
+      'thai_restaurant', 'laotian_restaurant', 'cambodian_restaurant', 'myanmar_restaurant',
+      'taiwanese_restaurant', 'hong_kong_restaurant', 'macanese_restaurant', 'tibetan_restaurant',
+      'uzbek_restaurant', 'kyrgyz_restaurant', 'tajik_restaurant', 'turkmen_restaurant'
+    ];
+    
+    const foundCuisineType = place.types.find(t => cuisineTypes.includes(t));
+    if (foundCuisineType) {
+      // Remove "_restaurant", replace underscores, capitalize first letter
+      const cuisine = foundCuisineType.replace('_restaurant', '').replace(/_/g, ' ');
+      console.log('Found cuisine from API types:', cuisine);
+      return cuisine.charAt(0).toUpperCase() + cuisine.slice(1);
+    }
+    
+    // If no API type found, try to detect from restaurant name
+    const name = place.name || '';
+    const lowerName = name.toLowerCase();
+    
+    // Thai cuisine patterns
+    if (lowerName.includes('thai') || lowerName.includes('siam') || lowerName.includes('bangkok') || 
+        lowerName.includes('pad thai') || lowerName.includes('curry') || lowerName.includes('ayada') ||
+        lowerName.includes('noodle') || lowerName.includes('pho') || lowerName.includes('vietnamese') ||
+        lowerName.includes('lao') || lowerName.includes('cambodian')) {
+      return 'Thai';
+    }
+    
+    // Korean cuisine patterns
+    if (lowerName.includes('korean') || lowerName.includes('seoul') || lowerName.includes('bibimbap') ||
+        lowerName.includes('bulgogi') || lowerName.includes('kimchi') || lowerName.includes('bbq') ||
+        lowerName.includes('kbbq') || lowerName.includes('한식') || lowerName.includes('삼겹살') ||
+        lowerName.includes('갈비') || lowerName.includes('치킨')) {
+      return 'Korean';
+    }
+    
+    // Japanese cuisine patterns
+    if (lowerName.includes('japanese') || lowerName.includes('sushi') || lowerName.includes('ramen') ||
+        lowerName.includes('tempura') || lowerName.includes('teriyaki') || lowerName.includes('udon') ||
+        lowerName.includes('bento') || lowerName.includes('izakaya') || lowerName.includes('japan') ||
+        lowerName.includes('tokyo') || lowerName.includes('osaka')) {
+      return 'Japanese';
+    }
+    
+    // Chinese cuisine patterns
+    if (lowerName.includes('chinese') || lowerName.includes('dim sum') || lowerName.includes('wonton') ||
+        lowerName.includes('dumpling') || lowerName.includes('peking') || lowerName.includes('beijing') ||
+        lowerName.includes('shanghai') || lowerName.includes('cantonese') || lowerName.includes('szechuan') ||
+        lowerName.includes('sichuan') || lowerName.includes('mandarin') || lowerName.includes('wok')) {
+      return 'Chinese';
+    }
+    
+    // Italian cuisine patterns
+    if (lowerName.includes('italian') || lowerName.includes('pizza') || lowerName.includes('pasta') ||
+        lowerName.includes('ristorante') || lowerName.includes('trattoria') || lowerName.includes('osteria') ||
+        lowerName.includes('mamma') || lowerName.includes('bella') || lowerName.includes('roma') ||
+        lowerName.includes('venice') || lowerName.includes('milan') || lowerName.includes('tuscany')) {
+      return 'Italian';
+    }
+    
+    // Mexican cuisine patterns
+    if (lowerName.includes('mexican') || lowerName.includes('taco') || lowerName.includes('burrito') ||
+        lowerName.includes('enchilada') || lowerName.includes('quesadilla') || lowerName.includes('guacamole') ||
+        lowerName.includes('salsa') || lowerName.includes('mexico') || lowerName.includes('azteca') ||
+        lowerName.includes('el') || lowerName.includes('la') || lowerName.includes('cantina')) {
+      return 'Mexican';
+    }
+    
+    // Indian cuisine patterns
+    if (lowerName.includes('indian') || lowerName.includes('curry') || lowerName.includes('tandoor') ||
+        lowerName.includes('naan') || lowerName.includes('biryani') || lowerName.includes('masala') ||
+        lowerName.includes('delhi') || lowerName.includes('bombay') || lowerName.includes('taj') ||
+        lowerName.includes('spice') || lowerName.includes('kebab') || lowerName.includes('kabob')) {
+      return 'Indian';
+    }
+    
+    // French cuisine patterns
+    if (lowerName.includes('french') || lowerName.includes('bistro') || lowerName.includes('brasserie') ||
+        lowerName.includes('cafe') || lowerName.includes('crepe') || lowerName.includes('croissant') ||
+        lowerName.includes('paris') || lowerName.includes('lyon') || lowerName.includes('provence') ||
+        lowerName.includes('escargot') || lowerName.includes('coq au vin') || lowerName.includes('ratatouille')) {
+      return 'French';
+    }
+    
+    // Mediterranean cuisine patterns
+    if (lowerName.includes('mediterranean') || lowerName.includes('greek') || lowerName.includes('lebanese') ||
+        lowerName.includes('turkish') || lowerName.includes('falafel') || lowerName.includes('hummus') ||
+        lowerName.includes('kebab') || lowerName.includes('gyro') || lowerName.includes('athens') ||
+        lowerName.includes('istanbul') || lowerName.includes('beirut')) {
+      return 'Mediterranean';
+    }
+    
+    // American cuisine patterns
+    if (lowerName.includes('american') || lowerName.includes('burger') || lowerName.includes('steak') ||
+        lowerName.includes('bbq') || lowerName.includes('barbecue') || lowerName.includes('diner') ||
+        lowerName.includes('grill') || lowerName.includes('pub') || lowerName.includes('tavern')) {
+      return 'American';
+    }
+    
+    return null;
+  };
+
+  // Helper function to generate short introduction for places
+  const getPlaceIntroduction = (place) => {
+    const types = place.types || [];
+    const name = place.name || '';
+    const rating = place.rating || 0;
+    const userRatings = place.user_ratings_total || 0;
+    
+    // For restaurants, show cuisine type
+    if (types.includes('restaurant') || types.includes('food')) {
+      const cuisine = getCuisineType(place);
+      if (cuisine) {
+        return `${cuisine} Restaurant`;
+      }
+      return 'Restaurant';
+    }
+    
+    // For cafes
+    if (types.includes('cafe')) {
+      return 'Cafe';
+    }
+    
+    // For bars
+    if (types.includes('bar')) {
+      return 'Bar';
+    }
+    
+    // For specific attraction types
+    if (types.includes('museum')) {
+      return 'Museum';
+    }
+    if (types.includes('art_gallery')) {
+      return 'Art Gallery';
+    }
+    if (types.includes('park')) {
+      return 'Park';
+    }
+    if (types.includes('church')) {
+      return 'Church';
+    }
+    if (types.includes('cathedral')) {
+      return 'Cathedral';
+    }
+    if (types.includes('castle')) {
+      return 'Castle';
+    }
+    if (types.includes('palace')) {
+      return 'Palace';
+    }
+    if (types.includes('temple')) {
+      return 'Temple';
+    }
+    if (types.includes('bridge')) {
+      return 'Bridge';
+    }
+    if (types.includes('tower')) {
+      return 'Tower';
+    }
+    if (types.includes('monument')) {
+      return 'Monument';
+    }
+    if (types.includes('memorial')) {
+      return 'Memorial';
+    }
+    if (types.includes('opera_house')) {
+      return 'Opera House';
+    }
+    if (types.includes('theater')) {
+      return 'Theater';
+    }
+    if (types.includes('stadium')) {
+      return 'Stadium';
+    }
+    if (types.includes('zoo')) {
+      return 'Zoo';
+    }
+    if (types.includes('aquarium')) {
+      return 'Aquarium';
+    }
+    if (types.includes('amusement_park')) {
+      return 'Amusement Park';
+    }
+    if (types.includes('shopping_mall')) {
+      return 'Shopping Mall';
+    }
+    
+    // Check name patterns for more specific descriptions
+    const lowerName = name.toLowerCase();
+    if (lowerName.includes('bridge')) return 'Bridge';
+    if (lowerName.includes('castle')) return 'Castle';
+    if (lowerName.includes('church')) return 'Church';
+    if (lowerName.includes('cathedral')) return 'Cathedral';
+    if (lowerName.includes('palace')) return 'Palace';
+    if (lowerName.includes('tower')) return 'Tower';
+    if (lowerName.includes('square')) return 'Square';
+    if (lowerName.includes('park')) return 'Park';
+    if (lowerName.includes('museum')) return 'Museum';
+    if (lowerName.includes('temple')) return 'Temple';
+    if (lowerName.includes('monument')) return 'Monument';
+    if (lowerName.includes('memorial')) return 'Memorial';
+    if (lowerName.includes('opera')) return 'Opera House';
+    if (lowerName.includes('theater') || lowerName.includes('theatre')) return 'Theater';
+    if (lowerName.includes('stadium')) return 'Stadium';
+    if (lowerName.includes('zoo')) return 'Zoo';
+    if (lowerName.includes('aquarium')) return 'Aquarium';
+    if (lowerName.includes('garden')) return 'Garden';
+    if (lowerName.includes('shrine')) return 'Shrine';
+    if (lowerName.includes('fortress')) return 'Fortress';
+    if (lowerName.includes('ruins')) return 'Ruins';
+    if (lowerName.includes('observatory')) return 'Observatory';
+    if (lowerName.includes('lighthouse')) return 'Lighthouse';
+    if (lowerName.includes('windmill')) return 'Windmill';
+    if (lowerName.includes('concert')) return 'Concert Hall';
+    
+    // Korean patterns
+    if (name.includes('교')) return 'Bridge';
+    if (name.includes('성')) return 'Castle';
+    if (name.includes('교회')) return 'Church';
+    if (name.includes('광장')) return 'Square';
+    if (name.includes('탑')) return 'Tower';
+    if (name.includes('공원')) return 'Park';
+    if (name.includes('박물관')) return 'Museum';
+    if (name.includes('사원')) return 'Temple';
+    if (name.includes('궁')) return 'Palace';
+    if (name.includes('산')) return 'Mountain';
+    if (name.includes('강')) return 'River';
+    if (name.includes('해변')) return 'Beach';
+    if (name.includes('섬')) return 'Island';
+    
+    // Default for tourist attractions
+    if (types.includes('tourist_attraction')) {
+      return 'Tourist Attraction';
+    }
+    
+    return 'Point of Interest';
+  };
+
+  // Helper function to generate simple English description
+  const generateEnglishDescription = (place) => {
+    // For now, return empty string since we're using getEnglishName for parentheses
+    // This avoids redundant descriptions
+    return '';
+  };
+
+  // Drag handler for modal
+  const onGestureEvent = Animated.event(
+    [{ nativeEvent: { translationY: new Animated.Value(0) } }],
+    { useNativeDriver: false }
+  );
+
+  const onHandlerStateChange = (event) => {
+    if (event.nativeEvent.oldState === State.ACTIVE) {
+      const { translationY } = event.nativeEvent;
+      
+      if (translationY > 100) {
+        // Close modal
+        setShowPlaceDetailModal(false);
+        setShowTopAttractionsModal(true);
+      } else if (translationY < -100) {
+        // Expand modal
+        setModalHeight(height * 0.95);
+      } else {
+        // Reset to original size
+        setModalHeight(height * 0.85);
+      }
+    }
+  };
+
+  const onTopAttractionsHandlerStateChange = (event) => {
+    if (event.nativeEvent.oldState === State.ACTIVE) {
+      const { translationY } = event.nativeEvent;
+      
+      if (translationY > 100) {
+        // Minimize modal
+        setModalState('minimized');
+        setModalHeight(80);
+      } else if (translationY < -100) {
+        // Expand modal
+        setModalState('full');
+        setModalHeight(height * 0.85);
+      }
+    }
+  };
+
+  useEffect(() => {
+    console.log('showPlaceModal changed:', showPlaceModal);
+    console.log('currentPlace changed:', currentPlace);
+  }, [showPlaceModal, currentPlace]);
+
+  const handleMarkerPress = (p) => {
+    console.log('=== handleMarkerPress 실행 ===');
+    console.log('클릭된 장소:', p.name);
+    
+    const newPlace = {
+      ...p,
+      rating: p.rating ?? 'N/A',
+      user_ratings_total: p.user_ratings_total ?? 0,
+      photo: p.photo ?? p.photos?.[0]?.photo_reference ?? null,
+      types: p.types ?? [],
+      vicinity: p.vicinity ?? p.address ?? '',
+    };
+    
+    setCurrentPlace(newPlace);
+    setShowPlaceModal(true);
+    checkIfPlaceIsSaved(newPlace);
+  };
+
+  return (
+    <GestureHandlerRootView style={{ flex: 1 }}>
+
+      {/* Search & Autocomplete */}
+      <View style={styles.searchOverlay}>
+        <View style={styles.searchRow}>
+          <View style={styles.searchContainer}>
+            <TextInput
+              style={styles.searchInput}
+              placeholder="Search place or city..."
+              value={search}
+              onChangeText={onSearch}
+              returnKeyType="search"
+              onSubmitEditing={handleDirectSearch}
+              onFocus={() => {
+                if (search.length === 0 && searchHistory.length > 0) {
+                  setShowSearchHistory(true);
+                }
+              }}
+            />
+            {search.length > 0 && (
+              <TouchableOpacity style={styles.clearButton} onPress={() => { setSearch(''); setSuggestions([]); setResults([]); setPopularPlaces([]); }}>
+                <Text style={styles.clearButtonText}>✕</Text>
+              </TouchableOpacity>
+            )}
+            {suggestions.map(s => (
+              <TouchableOpacity key={s.place_id} style={styles.autocompleteItem} onPress={() => selectSuggestion(s)}>
+                <Text style={styles.autocompleteText}>{s.description}</Text>
+              </TouchableOpacity>
+            ))}
+            {showSearchHistory && searchHistory.length > 0 && (
+              <View style={styles.searchHistoryContainer}>
+                <View style={styles.searchHistoryHeader}>
+                  <Text style={styles.searchHistoryTitle}>Recent Searches</Text>
+                  <TouchableOpacity onPress={clearSearchHistory}>
+                    <Text style={styles.clearHistoryText}>Clear All</Text>
+                  </TouchableOpacity>
+                </View>
+                {searchHistory.map((item, index) => (
+                  <TouchableOpacity 
+                    key={index} 
+                    style={styles.searchHistoryItem} 
+                    onPress={() => {
+                      setSearch(item);
+                      setShowSearchHistory(false);
+                      handleDirectSearch();
+                    }}
+                  >
+                    <Text style={styles.searchHistoryText}>🔍 {item}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
+          </View>
+          {/* Optimize Route 버튼을 서치바 오른쪽에 작게 */}
+          <TouchableOpacity style={styles.optimizeMiniBtn} onPress={optimize} disabled={optimizing}>
+            <Text style={styles.optimizeMiniIcon}>🧭</Text>
+            <Text style={styles.optimizeMiniText}>{optimizing ? '...' : saved.length}</Text>
+          </TouchableOpacity>
+
+        </View>
+      </View>
+      
+      
+      <MapView
+        ref={mapRef}
+        style={styles.map}
+        region={location || {
+          latitude: 40.7128,
+          longitude: -74.0060,
+          latitudeDelta: 0.05,
+          longitudeDelta: 0.05
+        }}
+        showsUserLocation
+        zoomEnabled
+        scrollEnabled
+        onPress={async (e) => {
+          // Only handle map press if not ignoring map press and not in explore mode
+          if (!ignoreMapPress && !isInExploreMode) {
+            setShowPlaceModal(false);
+            setCurrentPlace(null);
+            setShowSearchHistory(false); // 검색 기록창 닫기
+            setShowSearchHint(false); // dismiss hint when tapping map
+            
+            try {
+              const coord = e.nativeEvent.coordinate;
+              if (coord) {
+                const picked = await pickNearestPlaceAt(coord);
+                if (picked) {
+                  setCurrentPlace(picked);
+                  setShowPlaceModal(true);
+                }
+              }
+            } catch {}
+          } else if (isInExploreMode) {
+            // When in explore mode, just close the modal without changing location
+            setShowPlaceModal(false);
+            setCurrentPlace(null);
+            setShowSearchHistory(false);
+          }
+        }}
+        onRegionChangeComplete={(region) => {
+          console.log('Map region changed:', region);
+          // Only fetch places for new region if we're not in explore mode
+          if (!isInExploreMode) {
+            const centerLat = region.latitude;
+            const centerLng = region.longitude;
+            console.log('Fetching places for new region:', centerLat, centerLng);
+            fetchPlaces({ latitude: centerLat, longitude: centerLng });
+          } else {
+            console.log('Exploring specific landmark, not fetching new places');
+          }
+        }}
+      >
+        {(exploringLocation || (showCurrentLocationRadar && myLocation)) && <Circle 
+          center={exploringLocation || myLocation} 
+          radius={500} 
+          fillColor="rgba(30,144,255,0.15)" 
+          strokeColor="#2196F3" 
+          strokeWidth={2}
+        />}
+        {places.map(p => (
+          <Marker
+            key={p.place_id}
+            coordinate={{ latitude: p.geometry.location.lat, longitude: p.geometry.location.lng }}
+            tracksViewChanges={false}
+            onPress={() => {
+              console.log('Marker title pressed:', p.name);
+              handleMarkerPress(p);
+            }}
+          >
+            <View style={styles.markerContainer}>
+              {/* Place name label above marker */}
+              {selectedPlaceName === p.name && (
+                <View style={styles.markerLabel}>
+                  <Text style={styles.markerLabelText}>{p.name}</Text>
+                  <Text style={styles.markerLabelHint}>Tap again for details</Text>
+                </View>
+              )}
+              
+              <TouchableOpacity 
+                style={styles.customMarker}
+                onPress={() => {
+                  console.log('TouchableOpacity pressed:', p.name);
+                  handleMarkerPress(p);
+                }}
+                activeOpacity={0.8}
+              >
+                {p.photos && p.photos[0] ? (
+                  <Image 
+                    source={{ 
+                      uri: `https://maps.googleapis.com/maps/api/place/photo?maxwidth=100&photoreference=${p.photos[0].photo_reference}&key=${GOOGLE_API_KEY}` 
+                    }} 
+                    style={styles.markerImage}
+                  />
+                ) : (
+                  <View style={styles.markerIcon}>
+                    <Text style={styles.markerIconText}>📍</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+            </View>
+          </Marker>
+        ))}
+        {popularPlaces.map(p => (
+          <Marker
+            key={p.place_id}
+            coordinate={{ latitude: p.geometry.location.lat, longitude: p.geometry.location.lng }}
+            tracksViewChanges={false}
+            onPress={() => {
+              console.log('Popular marker title pressed:', p.name);
+              handleMarkerPress(p);
+            }}
+          >
+            <View style={styles.markerContainer}>
+              {/* Place name label above marker */}
+              {selectedPlaceName === p.name && (
+                <View style={styles.markerLabel}>
+                  <Text style={styles.markerLabelText}>{p.name}</Text>
+                  <Text style={styles.markerLabelHint}>Tap again for details</Text>
+                </View>
+              )}
+              
+              <TouchableOpacity 
+                style={styles.customMarker}
+                onPress={() => {
+                  console.log('Popular TouchableOpacity pressed:', p.name);
+                  handleMarkerPress(p);
+                }}
+                activeOpacity={0.8}
+              >
+                {p.photos && p.photos[0] ? (
+                  <Image 
+                    source={{ 
+                      uri: `https://maps.googleapis.com/maps/api/place/photo?maxwidth=100&photoreference=${p.photos[0].photo_reference}&key=${GOOGLE_API_KEY}` 
+                    }} 
+                    style={styles.markerImage}
+                  />
+                ) : (
+                  <View style={styles.markerIcon}>
+                    <Text style={styles.markerIconText}>🏛️</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+            </View>
+          </Marker>
+        ))}
+        {saved.map((p, i) => (
+          <Marker
+            key={p.id || `saved-${i}`}
+            coordinate={{ latitude: p.latitude, longitude: p.longitude }}
+            title={`${i + 1}. ${p.name}`}
+            pinColor="blue"
+          />
+        ))}
+        {polylines.map((pl, i) => (
+          <Polyline key={i} coordinates={pl.coordinates} strokeColor={pl.strokeColor} strokeWidth={pl.strokeWidth} />
+        ))}
+      </MapView>
+
+      {/* First-load City Prompt removed; replaced by hint bubble */}
+
+      {/* 인기 장소 리스트 하단 카드 */}
+      {loadingPlaces ? (
+        <View style={styles.loadingOverlay}>
+          <Text style={styles.loadingText}>Loading top attractions...</Text>
+        </View>
+      ) : null}
+
+      {/* Top Attractions Modal - Draggable like Google Maps */}
+      <Modal visible={showTopAttractionsModal} transparent animationType="fade">
+        <View
+          style={styles.modalOverlay}
+          pointerEvents={modalState === 'minimized' ? 'box-none' : 'auto'}
+        >
+          <PanGestureHandler onGestureEvent={onGestureEvent} onHandlerStateChange={onTopAttractionsHandlerStateChange}>
+            <Animated.View
+              style={[
+                styles.topAttractionsModal,
+                modalState === 'minimized' && styles.topAttractionsModalMinimized
+              ]}
+              pointerEvents={modalState === 'minimized' ? 'box-none' : 'auto'}
+            >
+              <View
+                style={[
+                  styles.modalHeader,
+                  modalState === 'horizontal' && styles.modalHeaderHorizontal
+                ]}
+                pointerEvents="auto"
+              >
+                <View style={styles.dragHandle} />
+                <Text style={[
+                  styles.modalTitle,
+                  modalState === 'horizontal' && styles.modalTitleHorizontal
+                ]}>Top Attractions</Text>
+      <TouchableOpacity
+                  style={styles.closeButtonAbsolute}
+                  onPress={() => setShowTopAttractionsModal(false)}
+      >
+                  <Text style={styles.closeButton}>✕</Text>
+      </TouchableOpacity>
+              </View>
+              {modalState !== 'minimized' && (
+                <ScrollView style={styles.attractionsList}>
+                  {popularPlaces.map((place, index) => (
+                    <TouchableOpacity 
+                      key={place.place_id} 
+                      style={styles.attractionCard}
+                      onPress={() => {
+                        setSelectedPlaceDetail({
+                          id: place.place_id,
+                          latitude: place.geometry.location.lat,
+                          longitude: place.geometry.location.lng,
+                          name: place.name,
+                          address: place.vicinity,
+                          vicinity: place.vicinity,
+                          rating: place.rating,
+                          photo: place.photos?.[0]?.photo_reference,
+                          types: place.types,
+                          user_ratings_total: place.user_ratings_total,
+                          price_level: place.price_level,
+                          opening_hours: place.opening_hours
+                        });
+                        setShowPlaceDetailModal(true);
+                      }}
+                    >
+                      <View style={styles.attractionImageContainer}>
+                        {place.photos?.[0]?.photo_reference ? (
+                          <Image 
+                            source={{ 
+                              uri: `https://maps.googleapis.com/maps/api/place/photo?maxwidth=300&photoreference=${place.photos[0].photo_reference}&key=${GOOGLE_API_KEY}` 
+                            }} 
+                            style={styles.attractionImage} 
+                          />
+                        ) : (
+                          <View style={styles.attractionImagePlaceholder}>
+                            <Text style={styles.placeholderText}>📷</Text>
+                          </View>
+                        )}
+                      </View>
+                      <View style={styles.attractionInfo}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                          <View style={{ flex: 1, paddingRight: 10 }}>
+                            <Text style={styles.attractionName} numberOfLines={2} ellipsizeMode='tail'>
+                              {place.name}{getEnglishNameInParentheses(place)}
+                            </Text>
+                          </View>
+                          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                            <TouchableOpacity 
+                              style={styles.addToListBtn}
+                              onPress={(e) => {
+                                e.stopPropagation();
+                                const placeData = {
+                                  id: place.place_id,
+                                  latitude: place.geometry.location.lat,
+                                  longitude: place.geometry.location.lng,
+                                  name: place.name,
+                                  address: place.vicinity,
+                                  vicinity: place.vicinity,
+                                  rating: place.rating,
+                                  photo: place.photos?.[0]?.photo_reference,
+                                  types: place.types,
+                                  user_ratings_total: place.user_ratings_total,
+                                  price_level: place.price_level,
+                                  opening_hours: place.opening_hours
+                                };
+                                savePlace(placeData);
+                                Alert.alert('Saved!', `${place.name} has been added to your list.`);
+                              }}
+                            >
+                              <Text style={styles.addToListText}>☑︎</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity 
+                              style={[styles.googleSearchBtn, { marginLeft: 6 }]}
+                              onPress={(e) => {
+                                e.stopPropagation();
+                                const searchQuery = encodeURIComponent(place.name);
+                                const url = `https://www.google.com/search?q=${searchQuery}`;
+                                Linking.openURL(url).catch(err => {
+                                  Alert.alert('Error', 'Could not open Google Search');
+                                });
+                              }}
+                            >
+                              <Ionicons name="search" size={16} color="#111" />
+                            </TouchableOpacity>
+                          </View>
+                        </View>
+                        <View style={{ height: 6 }} />
+                        <View style={styles.attractionRating}>
+                          <Text style={styles.ratingText}>⭐ {place.rating || 'N/A'}</Text>
+                          <TouchableOpacity 
+                            onPress={(e) => {
+                              e.stopPropagation();
+                              const searchQuery = encodeURIComponent(place.name);
+                              const url = `https://www.google.com/maps/search/${searchQuery}`;
+                              Linking.openURL(url).catch(err => {
+                                Alert.alert('Error', 'Could not open Google Maps');
+                              });
+                            }}
+                          >
+                            <Text style={styles.ratingCount}>({place.user_ratings_total || 0} reviews)</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              )}
+        </Animated.View>
+          </PanGestureHandler>
+      </View>
+      </Modal>
+
+      {/* Individual Pin Modal - Small modal for individual pins */}
+      <Modal visible={showPlaceModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.placeModalBottom}>
+            {console.log('Modal is rendering, showPlaceModal:', showPlaceModal, 'currentPlace:', currentPlace?.name)}
+            {currentPlace ? (
+              <>  
+                {/* Header with X Button */}
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <Text style={{ fontSize: 16, fontWeight: '600', color: '#1a1a1a', flex: 1 }}>
+                    {currentPlace.name}
+                  </Text>
+                  <TouchableOpacity onPress={() => setShowPlaceModal(false)} style={{ padding: 4 }}>
+                    <Text style={{ fontSize: 20, color: '#666' }}>×</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {/* Content with Picture on Left */}
+                <View style={{ flexDirection: 'row', alignItems: 'flex-start', marginBottom: 12 }}>
+                  {/* Left Side - Rectangular Picture */}
+                  {currentPlace.photo && (
+                    <Image 
+                      source={{ uri: `https://maps.googleapis.com/maps/api/place/photo?maxwidth=200&photoreference=${currentPlace.photo}&key=${GOOGLE_API_KEY}` }} 
+                      style={{ width: 130, height: 90, borderRadius: 8, marginRight: 12 }} 
+                      resizeMode="cover"
+                    />
+                  )}
+
+                  {/* Right Side - Text Content */}
+                  <View style={{ flex: 1, justifyContent: 'space-between', height: 90 }}>
+                    {/* Top Section - Rating and Address */}
+                    <View>
+                      {/* Line 1: Rating */}
+                      <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 6 }}>
+                        <Text style={{ fontSize: 14, color: '#333', fontWeight: '600', marginRight: 6 }}>
+                          ⭐ {currentPlace.rating || 'N/A'}
+                        </Text>
+                        <TouchableOpacity 
+                          onPress={() => {
+                            const searchQuery = encodeURIComponent(currentPlace.name);
+                            const url = `https://www.google.com/maps/search/${searchQuery}`;
+                            Linking.openURL(url).catch(err => {
+                              Alert.alert('Error', 'Could not open Google Maps');
+                            });
+                          }}
+                        >
+                          <Text style={{ fontSize: 12, color: '#007AFF', textDecorationLine: 'underline' }}>
+                            ({currentPlace.user_ratings_total || 0} reviews)
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+
+                      {/* Line 2: Address */}
+                      <Text style={{ fontSize: 12, color: '#666', lineHeight: 16 }}>
+                        {currentPlace.vicinity || currentPlace.address || currentPlace.formatted_address || `${currentPlace.name} - ${getPlaceIntroduction(currentPlace)}`}
+                      </Text>
+                    </View>
+
+                    {/* Bottom Section - Action Buttons (aligned with picture bottom) */}
+                    <View style={{ flexDirection: 'row', gap: 8, marginTop: 'auto' }}>
+                      <TouchableOpacity 
+                        style={styles.smallButton}
+                        onPress={() => {
+                          const searchQuery = encodeURIComponent(currentPlace.name);
+                          const url = `https://www.google.com/search?q=${searchQuery}`;
+                          Linking.openURL(url).catch(err => {
+                            Alert.alert('Error', 'Could not open Google Search');
+                          });
+                        }}
+                      >
+                        <Ionicons name="search" size={14} color="#007AFF" />
+                        <Text style={{ color: '#007AFF', fontSize: 10, fontWeight: '500', marginLeft: 3 }}>Search</Text>
+                      </TouchableOpacity>
+                      
+                      <TouchableOpacity 
+                        style={[styles.smallButton, isPlaceSaved && styles.savedButton]}
+                        onPress={() => savePlace(currentPlace)}
+                      >
+                        <Ionicons 
+                          name={isPlaceSaved ? "star" : "star-outline"} 
+                          size={14} 
+                          color={isPlaceSaved ? "#FF6B6B" : "#007AFF"} 
+                        />
+                        <Text style={{ 
+                          color: isPlaceSaved ? "#FF6B6B" : "#007AFF", 
+                          fontSize: 10, 
+                          fontWeight: '500', 
+                          marginLeft: 3 
+                        }}>
+                          {isPlaceSaved ? "Saved ✓" : "Save"}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                </View>
+              </>
+            ) : (
+              <Text>currentPlace 없음</Text>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* Route Modal */}
+      <Modal visible={showRouteModal} transparent animationType="slide">
+        <View style={styles.modalContainer}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Optimized Route</Text>
+            <ScrollView style={styles.routeList}>
+              {routeData.map((p, idx) => (
+                <View key={idx} style={styles.routeItem}>
+                  <Text style={styles.routeIndex}>{idx + 1}</Text>
+                  <Text style={styles.routeName}>{p.name}</Text>
+                </View>
+              ))}
+            </ScrollView>
+            <TouchableOpacity style={styles.closeRouteBtn} onPress={() => setShowRouteModal(false)}>
+              <Text>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+      {/* Add back the recenter button */}
+      <TouchableOpacity
+        style={styles.recenterBtn}
+        onPress={() => {
+          setExploringLocation(null);
+          setIsInExploreMode(false);
+          setShowCurrentLocationRadar(true);
+          if (myLocation) {
+            mapRef.current.animateToRegion({ ...myLocation, latitudeDelta: 0.01, longitudeDelta: 0.01 }, 500);
+          }
+        }}
+      >
+        <Text style={styles.recenterIcon}>📍</Text>
+      </TouchableOpacity>
+
+      {/* Save Location Button - appears when circle is visible */}
+      {(exploringLocation || (showCurrentLocationRadar && myLocation)) && (
+        <TouchableOpacity
+          style={styles.saveLocationBtn}
+          onPress={() => {
+            console.log('Save location button pressed');
+            setCircleLocation(exploringLocation || myLocation);
+            setShowDescriptionModal(true);
+            setDescriptionText('');
+          }}
+        >
+          <Text style={styles.saveLocationIcon}>💾</Text>
+          <Text style={styles.saveLocationText}>Save Location</Text>
+        </TouchableOpacity>
+      )}
+
+
+
+      {/* Add new Place Detail Modal */}
+      <Modal visible={showPlaceDetailModal} transparent animationType="fade">
+        <View style={styles.modalOverlay}>
+          <PanGestureHandler onGestureEvent={onGestureEvent} onHandlerStateChange={onHandlerStateChange}>
+            <Animated.View style={[styles.placeDetailModal, { maxHeight: modalHeight }]}>
+              <View style={styles.modalHeader}>
+                <View style={styles.dragHandle} />
+                <Text style={styles.modalTitle}>Place Details</Text>
+                <TouchableOpacity onPress={() => {
+                  setShowPlaceDetailModal(false);
+                  setShowTopAttractionsModal(true); // Return to top attractions modal
+                }}>
+                  <Text style={styles.closeButton}>✕</Text>
+                </TouchableOpacity>
+    </View>
+            {selectedPlaceDetail && (
+              <ScrollView style={styles.placeDetailContent}>
+                {selectedPlaceDetail.photo && (
+                  <Image 
+                    source={{ 
+                      uri: `https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photoreference=${selectedPlaceDetail.photo}&key=${GOOGLE_API_KEY}` 
+                    }} 
+                    style={styles.placeDetailImage} 
+                  />
+                )}
+                <Text style={styles.placeDetailName}>
+                  {selectedPlaceDetail.name}
+                </Text>
+                <Text style={styles.placeDetailAddress}>
+                  {getEnglishType(selectedPlaceDetail)}
+                  {selectedPlaceDetail.vicinity && (
+                    <Text style={styles.placeDetailVicinity}> • {selectedPlaceDetail.vicinity}</Text>
+                  )}
+                </Text>
+                {selectedPlaceDetail.types && selectedPlaceDetail.types.length > 0 && (
+                  <Text style={styles.placeDetailType}>
+                    {selectedPlaceDetail.types.slice(0, 3).map(type => type.replace(/_/g, ' ')).join(' • ')}
+                  </Text>
+                )}
+                <View style={styles.placeDetailRating}>
+                  <Text style={styles.placeDetailRatingText}>⭐ {selectedPlaceDetail.rating || 'N/A'}</Text>
+                  <Text style={styles.placeDetailReviewCount}>({selectedPlaceDetail.user_ratings_total || 0} reviews)</Text>
+                </View>
+                {selectedPlaceDetail.price_level && (
+                  <Text style={styles.placeDetailPrice}>
+                    Price Level: {'💰'.repeat(selectedPlaceDetail.price_level)}
+                  </Text>
+                )}
+                {selectedPlaceDetail.opening_hours && (
+                  <Text style={styles.placeDetailHours}>
+                    {selectedPlaceDetail.opening_hours.open_now ? '🟢 Open Now' : '🔴 Closed'}
+                  </Text>
+                )}
+                <View style={styles.placeDetailButtons}>
+                  <TouchableOpacity 
+                    style={styles.addToDetailBtn} 
+                    onPress={() => {
+                      savePlace(selectedPlaceDetail);
+                      Alert.alert('Saved!', `${selectedPlaceDetail.name} has been added to your list.`);
+                    }}
+                  >
+                    <Text style={styles.addToDetailText}>Save</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity 
+                    style={styles.googleBtn}
+                    onPress={() => {
+                      const searchQuery = encodeURIComponent(selectedPlaceDetail.name);
+                      const url = `https://www.google.com/search?q=${searchQuery}`;
+                      Alert.alert('Google Search', `This would open Google search for: ${selectedPlaceDetail.name}`);
+                    }}
+                  >
+                    <Text style={styles.googleBtnText}>🔍</Text>
+                  </TouchableOpacity>
+                </View>
+              </ScrollView>
+            )}
+            </Animated.View>
+          </PanGestureHandler>
+        </View>
+      </Modal>
+
+      {/* Description Modal for Circle Tap */}
+      <Modal visible={showDescriptionModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.descriptionModal}>
+            <View style={styles.descriptionModalHeader}>
+              <Text style={styles.descriptionModalTitle}>Save Location</Text>
+              <TouchableOpacity 
+                onPress={() => {
+                  setShowDescriptionModal(false);
+                  setDescriptionText('');
+                  setCircleLocation(null);
+                }}
+                style={styles.descriptionModalClose}
+              >
+                <Text style={styles.descriptionModalCloseText}>×</Text>
+              </TouchableOpacity>
+            </View>
+            
+            <View style={styles.descriptionModalContent}>
+              <Text style={styles.descriptionModalLabel}>Enter a description for this location:</Text>
+              <TextInput
+                style={styles.descriptionInput}
+                value={descriptionText}
+                onChangeText={setDescriptionText}
+                placeholder="e.g., My favorite coffee shop, Meeting point, etc."
+                multiline
+                numberOfLines={3}
+                textAlignVertical="top"
+              />
+              
+              <View style={styles.descriptionModalButtons}>
+                <TouchableOpacity 
+                  style={styles.descriptionCancelButton}
+                  onPress={() => {
+                    setShowDescriptionModal(false);
+                    setDescriptionText('');
+                    setCircleLocation(null);
+                  }}
+                >
+                  <Text style={styles.descriptionCancelText}>Cancel</Text>
+                </TouchableOpacity>
+                
+                <TouchableOpacity 
+                  style={styles.descriptionSaveButton}
+                  onPress={savePlaceWithDescription}
+                >
+                  <Text style={styles.descriptionSaveText}>Save Place</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </View>
+      </Modal>
+    </GestureHandlerRootView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1 },
+  map: { flex: 1 },
+  recenterBtn: { position: 'absolute', bottom: 50, right: 20, backgroundColor: '#fff', padding: 12, borderRadius: 25, elevation: 5, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.25, shadowRadius: 3.84, alignItems: 'center', justifyContent: 'center' },
+  recenterIcon: { fontSize: 20, color: '#4285f4' },
+  searchOverlay: { position: 'absolute', top: 50, left: 10, right: 20, zIndex: 10 },
+  searchContainer: { backgroundColor: '#fff', borderRadius: 8, padding: 8, elevation: 5, flex: 1 },
+  searchInput: { padding: 8, fontSize: 14 },
+  autocompleteItem: { padding: 8, borderBottomWidth: 1, borderColor: '#eee' },
+  autocompleteText: { fontSize: 14 },
+  optimizeContainer: { marginTop: 8, alignItems: 'center' },
+  optimizeButton: { backgroundColor: '#4CAF50', padding: 12, borderRadius: 8 },
+  optimizeButtonActive: { backgroundColor: '#FF9800' },
+  optimizeText: { color: '#fff', fontWeight: 'bold' },
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
+  hintBubble: { backgroundColor: '#111', borderRadius: 10, paddingVertical: 10, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  hintText: { color: '#fff', fontSize: 14, marginRight: 12 },
+  hintDismiss: { color: '#4dabf7', fontSize: 14, fontWeight: '600' },
+  hintArrow: { width: 0, height: 0, borderLeftWidth: 8, borderRightWidth: 8, borderTopWidth: 10, borderLeftColor: 'transparent', borderRightColor: 'transparent', borderTopColor: '#111', alignSelf: 'flex-start', marginLeft: 20 },
+  placeModal: { backgroundColor: '#fff', borderRadius: 12, padding: 16, width: width * 0.8, alignItems: 'center' },
+  placeImage: { width: '100%', height: 120, borderRadius: 8, marginBottom: 12 },
+  placeName: { 
+    fontSize: 18, 
+    fontWeight: '600', 
+    marginBottom: 6, 
+    color: '#1a1a1a',
+    lineHeight: 22,
+  },
+  placeType: {
+    fontSize: 15,
+    color: '#666',
+    marginBottom: 12,
+    fontWeight: '400',
+    lineHeight: 20,
+  },
+  placeRatingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  placeRating: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1a1a1a',
+    marginRight: 8,
+  },
+  placeReviewCount: {
+    fontSize: 15,
+    color: '#007AFF',
+    textDecorationLine: 'underline',
+    fontWeight: '500',
+  },
+  placeRatingSmall: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: '#666',
+    marginRight: 4,
+  },
+  placeReviewCountSmall: {
+    fontSize: 12,
+    color: '#007AFF',
+    textDecorationLine: 'underline',
+    fontWeight: '400',
+  },
+  googleMapsButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    backgroundColor: '#f8f9fa',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#dadce0',
+  },
+  saveButton: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f8f9fa',
+    borderWidth: 1,
+    borderColor: '#dadce0',
+  },
+  simpleButton: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f0f0f0',
+    borderWidth: 1,
+    borderColor: '#ddd',
+  },
+  actionButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f8f9fa',
+    borderWidth: 1,
+    borderColor: '#007AFF',
+    borderRadius: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    minWidth: 100,
+  },
+  compactButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f8f9fa',
+    borderWidth: 1,
+    borderColor: '#007AFF',
+    borderRadius: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    minWidth: 80,
+  },
+  smallButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f8f9fa',
+    borderWidth: 1,
+    borderColor: '#007AFF',
+    borderRadius: 4,
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+    minWidth: 60,
+  },
+  savedButton: {
+    backgroundColor: '#FFE5E5',
+    borderColor: '#FF6B6B',
+  },
+  addBtn: { backgroundColor: '#2196F3', paddingVertical: 8, paddingHorizontal: 16, borderRadius: 8, marginBottom: 8 },
+  addText: { color: '#fff', fontWeight: 'bold' },
+  cancelBtn: { padding: 8 },
+  modalContainer: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
+  modalContent: { backgroundColor: '#fff', borderRadius: 12, padding: 16, width: width * 0.8 },
+  modalTitle: { fontSize: 18, fontWeight: 'bold', marginBottom: 12 },
+  routeList: { maxHeight: height * 0.4 },
+  routeItem: { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },
+  routeIndex: { backgroundColor: '#2196F3', color: '#fff', width: 24, height: 24, borderRadius: 12, textAlign: 'center', lineHeight: 24, marginRight: 8 },
+  routeName: { fontSize: 14 },
+  closeRouteBtn: { marginTop: 12, padding: 12, backgroundColor: '#4CAF50', borderRadius: 8, alignItems: 'center' },
+  placesListBox: {
+    position: 'absolute',
+    bottom: 10,
+    left: 10,
+    right: 10,
+    backgroundColor: '#fff',
+    borderRadius: 10,
+    padding: 10,
+    elevation: 5,
+    zIndex: 10,
+  },
+  loadingText: {
+    fontSize: 14,
+    color: '#666',
+    textAlign: 'center',
+  },
+  noResultsText: {
+    fontSize: 14,
+    color: '#666',
+    textAlign: 'center',
+  },
+  placeCard: {
+    width: width * 0.35, // Adjust as needed
+    marginRight: 10,
+    backgroundColor: '#f0f0f0',
+    borderRadius: 8,
+    overflow: 'hidden',
+  },
+  placeCardImage: {
+    width: '100%',
+    height: 100,
+    borderTopLeftRadius: 8,
+    borderTopRightRadius: 8,
+  },
+  placeCardTitle: {
+    fontSize: 12,
+    fontWeight: 'bold',
+    paddingHorizontal: 5,
+    paddingVertical: 3,
+    textAlign: 'center',
+  },
+  placeCardDesc: {
+    fontSize: 10,
+    color: '#666',
+    paddingHorizontal: 5,
+    paddingBottom: 3,
+    textAlign: 'center',
+  },
+  placeCardRating: {
+    fontSize: 10,
+    fontWeight: 'bold',
+    color: '#FF9800',
+    paddingHorizontal: 5,
+    paddingBottom: 3,
+    textAlign: 'center',
+  },
+  clearButton: {
+    position: 'absolute',
+    right: 8,
+    top: 8,
+    padding: 4,
+    zIndex: 2,
+  },
+  clearButtonText: {
+    fontSize: 18,
+    color: '#888',
+  },
+  clearSavedButton: {
+    position: 'absolute',
+    right: 40,
+    top: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    backgroundColor: '#ff6b6b',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  clearSavedButtonText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: 'bold',
+  },
+  searchHistoryContainer: {
+    backgroundColor: '#f8f9fa',
+    borderRadius: 8,
+    marginTop: 8,
+    padding: 8,
+  },
+  searchHistoryHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+    paddingHorizontal: 4,
+  },
+  searchHistoryTitle: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: '#333',
+  },
+  clearHistoryText: {
+    fontSize: 12,
+    color: '#007AFF',
+  },
+  searchHistoryItem: {
+    paddingVertical: 8,
+    paddingHorizontal: 4,
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
+  },
+  searchHistoryText: {
+    fontSize: 14,
+    color: '#333',
+  },
+  placeType: {
+    fontSize: 13,
+    color: '#888',
+    marginBottom: 8,
+    fontStyle: 'italic',
+  },
+  markerLegendBox: {
+    position: 'absolute',
+    bottom: 120,
+    left: 10,
+    backgroundColor: 'rgba(255,255,255,0.95)',
+    borderRadius: 8,
+    padding: 8,
+    elevation: 3,
+    zIndex: 20,
+  },
+  markerLegendTitle: {
+    fontSize: 13,
+    fontWeight: 'bold',
+    marginBottom: 4,
+  },
+  markerLegendRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 2,
+  },
+  markerLegendDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    marginRight: 6,
+  },
+  markerLegendText: {
+    fontSize: 12,
+    color: '#333',
+  },
+  searchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  optimizeMiniBtn: {
+    marginLeft: 8,
+    backgroundColor: '#4CAF50',
+    borderRadius: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    elevation: 2,
+  },
+  optimizeMiniIcon: {
+    fontSize: 18,
+    color: '#fff',
+    marginRight: 2,
+  },
+  optimizeMiniText: {
+    fontSize: 13,
+    color: '#fff',
+    fontWeight: 'bold',
+  },
+
+  loadingOverlay: {
+    position: 'absolute',
+    top: '50%',
+    left: '50%',
+    transform: [{ translateX: -50 }, { translateY: -50 }],
+    backgroundColor: 'rgba(0,0,0,0.8)',
+    padding: 20,
+    borderRadius: 10,
+    zIndex: 100,
+  },
+  topAttractionsModal: {
+    backgroundColor: '#fff',
+    borderRadius: 20,
+    margin: 10,
+    maxHeight: height * 0.85,
+    width: width * 0.95,
+    elevation: 10,
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+    paddingTop: 30,
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
+    position: 'relative',
+  },
+  modalHeaderHorizontal: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 15,
+    paddingTop: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
+    position: 'relative',
+  },
+  dragHandle: {
+    position: 'absolute',
+    top: 12,
+    left: '50%',
+    transform: [{ translateX: -10 }],
+    width: 60,
+    height: 6,
+    backgroundColor: '#333',
+    borderRadius: 3,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.3,
+    shadowRadius: 2,
+    elevation: 3,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#333',
+  },
+  modalTitleHorizontal: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#333',
+  },
+  closeButton: {
+    fontSize: 24,
+    color: '#666',
+    padding: 5,
+  },
+  closeButtonAbsolute: {
+    position: 'absolute',
+    right: 20,
+    top: 30,
+    zIndex: 10,
+  },
+  attractionsList: {
+    padding: 10,
+    paddingHorizontal: 5,
+  },
+  attractionsListHorizontal: {
+    padding: 5,
+    paddingHorizontal: 5,
+    paddingTop: 0,
+  },
+  attractionCard: {
+    flexDirection: 'row',
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    marginBottom: 10,
+    padding: 14,
+    elevation: 1,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.06,
+    shadowRadius: 2,
+  },
+  attractionImageContainer: {
+    position: 'relative',
+    marginRight: 15,
+  },
+  attractionImage: {
+    width: 72,
+    height: 72,
+    borderRadius: 10,
+  },
+  attractionImagePlaceholder: {
+    width: 72,
+    height: 72,
+    borderRadius: 10,
+    backgroundColor: '#e9ecef',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  placeholderText: {
+    fontSize: 24,
+    color: '#6c757d',
+  },
+  attractionRank: {
+    position: 'absolute',
+    top: -5,
+    left: -5,
+    backgroundColor: '#007bff',
+    borderRadius: 12,
+    width: 24,
+    height: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  rankText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  attractionInfo: {
+    flex: 1,
+    justifyContent: 'flex-start',
+    paddingRight: 10,
+  },
+
+  attractionName: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: '#000',
+    marginBottom: 0,
+    lineHeight: 16,
+    paddingBottom: 0,
+    marginTop: 0,
+    textAlign: 'left',
+  },
+  attractionType: {
+    fontSize: 12,
+    color: '#666',
+    marginBottom: 4,
+    lineHeight: 14,
+    textAlign: 'left',
+    fontStyle: 'italic',
+  },
+  attractionAddress: {
+    fontSize: 14,
+    color: '#555',
+    marginBottom: 4,
+    lineHeight: 16,
+  },
+  attractionVicinity: {
+    fontSize: 12,
+    color: '#888',
+    fontStyle: 'italic',
+  },
+  attractionRating: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: -2,
+    paddingTop: 0,
+    marginBottom: 0,
+    justifyContent: 'flex-start',
+  },
+  ratingText: {
+    fontSize: 13,
+    fontWeight: 'bold',
+    color: '#111',
+    marginRight: 4,
+  },
+  ratingCount: {
+    fontSize: 12,
+    color: '#007AFF',
+    textDecorationLine: 'underline',
+  },
+  addToListBtn: {
+    backgroundColor: '#fff',
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    width: 30,
+    height: 30,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: 8,
+  },
+  addToListText: {
+    color: '#111',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  attractionButtons: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 0,
+    justifyContent: 'flex-end',
+  },
+
+  googleSearchBtn: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    width: 30,
+    height: 30,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  googleSearchText: {
+    color: '#000',
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  placeModalBottom: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 16,
+    alignItems: 'flex-start',
+    justifyContent: 'flex-start',
+    position: 'absolute',
+    bottom: 30,
+    left: 16,
+    right: 16,
+    zIndex: 1000,
+    elevation: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    borderWidth: 1,
+    borderColor: '#f0f0f0',
+  },
+  placeDetailModal: {
+    backgroundColor: '#fff',
+    borderRadius: 20,
+    margin: 20,
+    maxHeight: height * 0.8,
+    width: width * 0.9,
+    elevation: 10,
+  },
+  placeDetailContent: {
+    padding: 20,
+  },
+  placeDetailImage: {
+    width: '100%',
+    height: 200,
+    borderRadius: 12,
+    marginBottom: 16,
+  },
+  placeDetailName: {
+    fontSize: 22,
+    fontWeight: 'bold',
+    color: '#000',
+    marginBottom: 8,
+  },
+  placeDetailAddress: {
+    fontSize: 16,
+    color: '#555',
+    marginBottom: 8,
+  },
+  placeDetailVicinity: {
+    fontSize: 14,
+    color: '#888',
+    fontStyle: 'italic',
+  },
+  placeDetailType: {
+    fontSize: 14,
+    color: '#888',
+    fontStyle: 'italic',
+    marginBottom: 12,
+  },
+  placeDetailRating: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  placeDetailRatingText: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#ffc107',
+    marginRight: 8,
+  },
+  placeDetailReviewCount: {
+    fontSize: 14,
+    color: '#666',
+  },
+  placeDetailPrice: {
+    fontSize: 14,
+    color: '#666',
+    marginBottom: 8,
+  },
+  placeDetailHours: {
+    fontSize: 14,
+    color: '#666',
+    marginBottom: 20,
+  },
+  placeDetailButtons: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 4,
+  },
+  addToDetailBtn: {
+    flex: 1,
+    backgroundColor: '#28a745',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  addToDetailText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  googleBtn: {
+    backgroundColor: '#4285f4',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    alignItems: 'center',
+    minWidth: 60,
+  },
+  googleBtnText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  cancelDetailBtn: {
+    flex: 1,
+    backgroundColor: '#6c757d',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  cancelDetailText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  placeModalButtons: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 4,
+    marginBottom: 12,
+  },
+  googleBtnSmall: {
+    backgroundColor: '#4285f4',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    minWidth: 50,
+  },
+  googleBtnTextSmall: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  topAttractionsModalMinimized: {
+    maxHeight: 80,
+    overflow: 'hidden',
+  },
+  topAttractionsModalHorizontal: {
+    maxHeight: 180,
+    overflow: 'hidden',
+  },
+  modalHeaderButtons: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  minimizeBtn: {
+    padding: 5,
+  },
+  minimizeBtnText: {
+    fontSize: 18,
+  },
+  // 세로 버전 스타일들
+  attractionCardVertical: {
+    flexDirection: 'row',
+    backgroundColor: '#f8f9fa',
+    borderRadius: 12,
+    marginBottom: 10,
+    padding: 15,
+    elevation: 2,
+  },
+  attractionImageContainerVertical: {
+    position: 'relative',
+    marginRight: 15,
+  },
+  attractionImageVertical: {
+    width: 60,
+    height: 60,
+    borderRadius: 8,
+  },
+  attractionImagePlaceholderVertical: {
+    width: 60,
+    height: 60,
+    borderRadius: 8,
+    backgroundColor: '#e9ecef',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  attractionInfoVertical: {
+    flex: 1,
+    justifyContent: 'space-between',
+    paddingRight: 10,
+  },
+  attractionNameVertical: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#000',
+    marginBottom: 4,
+    lineHeight: 18,
+  },
+  attractionRatingVertical: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 0,
+  },
+  ratingTextVertical: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: '#000',
+    marginRight: 6,
+  },
+  ratingCountVertical: {
+    fontSize: 12,
+    color: '#007AFF',
+    textDecorationLine: 'underline',
+  },
+  attractionButtonsVertical: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginLeft: 8,
+  },
+  attractionButtonsHorizontal: {
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: 4,
+    marginLeft: 4,
+  },
+  attractionNameRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  addToListBtnVertical: {
+    backgroundColor: '#28a745',
+    borderRadius: 18,
+    width: 36,
+    height: 36,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  addToListTextVertical: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
+  googleSearchBtnVertical: {
+    backgroundColor: '#4285f4',
+    borderRadius: 18,
+    width: 36,
+    height: 36,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  googleSearchTextVertical: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
+  // Custom Marker Styles
+  customMarker: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: 'white',
+    borderWidth: 2,
+    borderColor: '#007AFF',
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  markerImage: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+  },
+  markerIcon: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    backgroundColor: '#007AFF',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  markerIconText: {
+    fontSize: 20,
+    color: 'white',
+  },
+  markerContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  markerLabel: {
+    backgroundColor: 'rgba(0,0,0,0.8)',
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    marginBottom: 4,
+    maxWidth: 120,
+  },
+  markerLabelText: {
+    color: 'white',
+    fontSize: 12,
+    fontWeight: 'bold',
+    textAlign: 'center',
+  },
+  markerLabelHint: {
+    color: 'white',
+    fontSize: 10,
+    textAlign: 'center',
+    marginTop: 2,
+    opacity: 0.8,
+  },
+  // Description Modal Styles
+  descriptionModal: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    width: width * 0.9,
+    maxWidth: 400,
+    maxHeight: height * 0.6,
+  },
+  descriptionModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
+  },
+  descriptionModalTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#1a1a1a',
+  },
+  descriptionModalClose: {
+    padding: 4,
+  },
+  descriptionModalCloseText: {
+    fontSize: 20,
+    color: '#666',
+  },
+  descriptionModalContent: {
+    padding: 16,
+  },
+  descriptionModalLabel: {
+    fontSize: 14,
+    color: '#666',
+    marginBottom: 12,
+  },
+  descriptionInput: {
+    borderWidth: 1,
+    borderColor: '#ddd',
+    borderRadius: 8,
+    padding: 12,
+    fontSize: 16,
+    backgroundColor: '#f9f9f9',
+    minHeight: 80,
+    marginBottom: 20,
+  },
+  descriptionModalButtons: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  descriptionCancelButton: {
+    flex: 1,
+    padding: 12,
+    borderRadius: 8,
+    backgroundColor: '#f5f5f5',
+    alignItems: 'center',
+  },
+  descriptionCancelText: {
+    color: '#666',
+    fontSize: 16,
+    fontWeight: '500',
+  },
+  descriptionSaveButton: {
+    flex: 1,
+    padding: 12,
+    borderRadius: 8,
+    backgroundColor: '#007AFF',
+    alignItems: 'center',
+  },
+  descriptionSaveText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  // Save Location Button Styles
+  saveLocationBtn: {
+    position: 'absolute',
+    bottom: 120,
+    right: 20,
+    backgroundColor: '#007AFF',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 25,
+    elevation: 5,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+  },
+  saveLocationIcon: {
+    fontSize: 16,
+    marginRight: 6,
+  },
+  saveLocationText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+});
