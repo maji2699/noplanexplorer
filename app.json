@@ -1,0 +1,21 @@
+{
+  "expo": {
+    "name": "NoPlan Explorer",
+    "slug": "tripwalktalk",
+    "version": "1.0.0",
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "5d95ad08-cce1-4333-9c43-53b1304f0900"
+      }
+    },
+    "plugins": [
+      "expo-localization"
+    ],
+    "android": {
+      "package": "com.sunnyma.tripwalktalk"
+    }
+  }
+}
