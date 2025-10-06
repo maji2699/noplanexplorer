@@ -23,7 +23,7 @@ import 'react-native-gesture-handler';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
 const { width, height } = Dimensions.get('window');
-const GOOGLE_API_KEY = 'AIzaSyCqxQ6kxgKTG6mt0FnjcUgrvMcKm1Fluak';
+const GOOGLE_API_KEY = '';
 
 // 키워드-타입 매핑 테이블
 const keywordToType = [
